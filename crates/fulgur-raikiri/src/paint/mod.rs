@@ -7,6 +7,7 @@
 //! scaled by [`PX_TO_PT`] once and everything below draws in px.
 
 mod border;
+mod border_image;
 mod box_shadow;
 mod clip;
 mod decoration;
@@ -815,7 +816,12 @@ fn paint_box(
     paint_background(surface, raster, &border_box, padding, slice, style, text)?;
     let padding_box = border_box.inset(slice.edges(border::widths(style)));
     box_shadow::paint_inset(surface, &padding_box, slice, style, &mut raster.box_shadows);
-    border::paint_borders(surface, &border_box, style, slice);
+    // CSS Backgrounds 3 §6: `border-image` does not apply to internal table
+    // boxes in the collapsing border model.
+    if collapse == Collapse::Internal || !border_image::paint(surface, raster, rect, slice, style)?
+    {
+        border::paint_borders(surface, &border_box, style, slice);
+    }
     Ok(())
 }
 

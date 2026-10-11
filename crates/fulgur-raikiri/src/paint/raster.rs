@@ -15,7 +15,7 @@ use raikiri_html::computed::{
 };
 use raikiri_html::image_geometry::{background_image_dimensions, background_tiles};
 use raikiri_html::{Fragment, NodeId, Page, PaintRect, RasterImage};
-use raikiri_traits::{DecodedImage, ImagePixelSource, ImageRasterSize};
+use raikiri_traits::{DecodedImage, ImageIntrinsicSize, ImagePixelSource, ImageRasterSize};
 use url::Url;
 
 #[derive(Clone, Hash)]
@@ -228,20 +228,9 @@ impl<'a> RasterCache<'a> {
             return Ok(());
         };
         // `round` rescales the tile, so decode at the size actually drawn.
-        let raster = ImageRasterSize {
-            width: tiles.width as f32,
-            height: tiles.height as f32,
-        };
-        let Some(pixels) = source.get_decoded_at_size(&url, raster, None) else {
+        let Some(image) = self.sized_image(&url, tiles.width as f32, tiles.height as f32)? else {
             return Ok(());
         };
-        let bytes = (pixels.width as usize)
-            .checked_mul(pixels.height as usize)
-            .and_then(|count| count.checked_mul(4));
-        if pixels.width == 0 || pixels.height == 0 || bytes != Some(pixels.rgba.len()) {
-            return Ok(());
-        }
-        let image = self.image(&url, &pixels)?;
         let (path, rule) = area;
         surface.push_clip_path(path, &rule);
         for y in &tiles.y {
@@ -253,6 +242,37 @@ impl<'a> RasterCache<'a> {
         }
         surface.pop();
         Ok(())
+    }
+
+    /// The resolved URL and natural size of a `url()` image, or `None` when
+    /// it cannot be fetched or decoded.
+    pub(super) fn natural_size(&self, raw: &str) -> Option<(Url, ImageIntrinsicSize)> {
+        let url = self.resolve(raw)?;
+        let natural = self.source?.intrinsic_size(&url)?;
+        Some((url, natural))
+    }
+
+    /// The image at `url` decoded for drawing at `width` × `height` px.
+    pub(super) fn sized_image(
+        &mut self,
+        url: &Url,
+        width: f32,
+        height: f32,
+    ) -> Result<Option<Image>> {
+        let Some(source) = self.source else {
+            return Ok(None);
+        };
+        let Some(pixels) = source.get_decoded_at_size(url, ImageRasterSize { width, height }, None)
+        else {
+            return Ok(None);
+        };
+        let bytes = (pixels.width as usize)
+            .checked_mul(pixels.height as usize)
+            .and_then(|count| count.checked_mul(4));
+        if pixels.width == 0 || pixels.height == 0 || bytes != Some(pixels.rgba.len()) {
+            return Ok(None);
+        }
+        self.image(url, &pixels).map(Some)
     }
 
     /// The absolute image URL of a computed `url()` value, without its
@@ -281,6 +301,14 @@ impl<'a> RasterCache<'a> {
 #[cfg(test)]
 mod tests {
     use super::RasterCache;
+
+    #[test]
+    fn images_without_a_pixel_source_are_unavailable() {
+        let mut cache = RasterCache::for_tests(None);
+        let url = url::Url::parse("file:///a.png").unwrap();
+        assert!(cache.natural_size("a.png").is_none());
+        assert!(cache.sized_image(&url, 10.0, 10.0).unwrap().is_none());
+    }
 
     #[test]
     fn local_and_empty_references_resolve_to_nothing() {
