@@ -48,13 +48,11 @@ pub(super) fn supported(
     if !text_nodes.is_empty() && !text_lines.is_empty() {
         return false;
     }
-    runs.iter().all(|run| {
-        let line = text_lines.contains(&(run.line, group(run)));
-        match run.source {
-            RunSource::Text(node) => line || text_nodes.contains(&node),
-            RunSource::Generated(_, _) | RunSource::Ellipsis(_) => line,
-            _ => false,
-        }
+    let line = |run: &PositionedGlyphRun<'_>| text_lines.contains(&(run.line, group(run)));
+    runs.iter().all(|run| match run.source {
+        RunSource::Text(node) => line(run) || text_nodes.contains(&node),
+        RunSource::Generated(_, _) | RunSource::Ellipsis(_) => line(run),
+        _ => false,
     })
 }
 
