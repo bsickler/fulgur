@@ -68,6 +68,7 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
             &mut svg,
             &mut raster,
             &mut crate::tagging::Tags::disabled(),
+            None,
         )
         .unwrap();
         surface.finish();
@@ -178,6 +179,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
             &mut svg,
             &mut raster,
             &mut crate::tagging::Tags::disabled(),
+            None,
         )
         .unwrap();
         surface.finish();
@@ -269,6 +271,7 @@ fn background_url_skips_missing_sources_and_unusable_pixels() {
             &mut svg,
             &mut raster,
             &mut crate::tagging::Tags::disabled(),
+            None,
         )
         .unwrap();
         surface.finish();

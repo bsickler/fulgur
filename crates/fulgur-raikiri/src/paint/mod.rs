@@ -9,6 +9,7 @@
 mod border;
 mod border_image;
 mod box_shadow;
+mod canvas;
 mod clip;
 mod decoration;
 mod gradient;
@@ -207,6 +208,16 @@ impl<'a> Painter<'a> {
         surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
         tags.begin_page(page);
+        // The canvas background goes under everything else on the page.
+        let canvas_owner = canvas::owner(page);
+        if let Some(owner) = canvas_owner {
+            tags.mark(
+                &mut surface,
+                page,
+                Target::Artifact(ArtifactType::Other),
+                |surface| canvas::paint(surface, raster, page, owner),
+            )?;
+        }
         // The margin boxes are drawn before the page body.
         let running = margin::paint(
             &mut surface,
@@ -217,7 +228,7 @@ impl<'a> Painter<'a> {
             raster,
             tags,
         )?;
-        paint_body(&mut surface, page, fonts, svg, raster, tags)?;
+        paint_body(&mut surface, page, fonts, svg, raster, tags, canvas_owner)?;
 
         surface.pop();
         surface.finish();
@@ -308,6 +319,8 @@ fn start_page(pdf: &mut krilla::Document, page_box: PaintRect) -> Result<krilla:
 
 /// Draw the boxes, text and replaced content of `page`, without its margin
 /// boxes. A running element laid out for a margin box is drawn the same way.
+/// `canvas_owner` is the element whose background was painted as the canvas
+/// background, which its own box does not paint again.
 fn paint_body(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
@@ -315,16 +328,28 @@ fn paint_body(
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
+    canvas_owner: Option<NodeId>,
 ) -> Result<()> {
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
     if order::supported(&events, &runs, |run| page.text_run_opacity_group(run)) {
-        paint_ordered(surface, page, &events, &runs, fonts, svg, raster, tags)
+        paint_ordered(
+            surface,
+            page,
+            &events,
+            &runs,
+            fonts,
+            svg,
+            raster,
+            tags,
+            canvas_owner,
+        )
     } else {
-        paint_legacy(surface, page, &runs, fonts, svg, raster, tags)
+        paint_legacy(surface, page, &runs, fonts, svg, raster, tags, canvas_owner)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_legacy(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
@@ -333,6 +358,7 @@ fn paint_legacy(
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
+    canvas_owner: Option<NodeId>,
 ) -> Result<()> {
     let clips = ClipMap::new(page);
     let mut active = ClipStack::default();
@@ -347,6 +373,13 @@ fn paint_legacy(
     boxes.sort_by_key(|fragment| (fragment.node(), fragment.fragment_index()));
     for fragment in boxes {
         if let Some(style) = page.computed(fragment.node()) {
+            let canvas_style;
+            let style = if Some(fragment.node()) == canvas_owner {
+                canvas_style = canvas::without_background(style);
+                &canvas_style
+            } else {
+                style
+            };
             // A box's own overflow clips its content, not its decorations.
             let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
             active.apply(surface, &clips, &chain);
@@ -404,6 +437,7 @@ fn paint_ordered(
     svg: &mut svg::SvgCache<'_>,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
+    canvas_owner: Option<NodeId>,
 ) -> Result<()> {
     // Ordered painting consumes every producer clip directly. The legacy
     // DOM-based clip lookup would apply the same shape twice and cannot
@@ -464,6 +498,13 @@ fn paint_ordered(
         match event {
             PaintEvent::Box(fragment) => {
                 if let Some(style) = page.computed(fragment.node()) {
+                    let canvas_style;
+                    let style = if Some(fragment.node()) == canvas_owner {
+                        canvas_style = canvas::without_background(style);
+                        &canvas_style
+                    } else {
+                        style
+                    };
                     let chain =
                         clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
                     active.apply(surface, &clips, &chain);
