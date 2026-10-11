@@ -14,6 +14,7 @@ use super::raster::RasterCache;
 use super::shape::{Edges, RoundedRect, Slice};
 use crate::tagging::{Tags, Target};
 use fulgur_core::Result;
+use krilla::num::NormalizedF32;
 use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use raikiri_html::computed::{
@@ -24,22 +25,35 @@ use raikiri_html::{NodeId, NodeKind, Page};
 /// The element whose background is the canvas background of `page`, with
 /// its computed style.
 pub(super) fn owner<'p>(page: &'p Page<'_>) -> Option<(NodeId, &'p ComputedValues)> {
-    let dom = page.dom();
-    let element = |node: NodeId, name: &str| {
-        dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some(name)
-    };
-    let html = dom
-        .children(dom.root())
-        .find(|&node| element(node, "html"))?;
-    if let Some(style) = page.computed(html)
-        && has_background(style)
-    {
-        return generates_box(style).then_some((html, style));
+    let html = root(page)?;
+    let html_style = page.computed(html)?;
+    // A root without a box leaves the canvas transparent; its body does not
+    // take over.
+    if !generates_box(html_style) {
+        return None;
     }
-    let body = dom.children(html).find(|&node| element(node, "body"))?;
+    if has_background(html_style) {
+        return Some((html, html_style));
+    }
+    let dom = page.dom();
+    let body = dom
+        .children(html)
+        .find(|&node| is_element(page, node, "body"))?;
     page.computed(body)
         .filter(|style| has_background(style) && generates_box(style))
         .map(|style| (body, style))
+}
+
+/// The root `<html>` element of `page`.
+fn root(page: &Page<'_>) -> Option<NodeId> {
+    let dom = page.dom();
+    dom.children(dom.root())
+        .find(|&node| is_element(page, node, "html"))
+}
+
+fn is_element(page: &Page<'_>, node: NodeId, name: &str) -> bool {
+    let dom = page.dom();
+    dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some(name)
 }
 
 fn generates_box(style: &ComputedValues) -> bool {
@@ -61,11 +75,24 @@ pub(super) fn paint_page(
     let Some((owner, style)) = owner(page) else {
         return Ok(None);
     };
+    // The canvas is painted into the root element's group, so the root's
+    // opacity applies to it (Compositing and Blending 1 §3.3.1).
+    let opacity = root(page)
+        .and_then(|html| page.computed(html))
+        .map_or(1.0, |style| style.opacity);
     tags.mark(
         surface,
         page,
         Target::Artifact(ArtifactType::Other),
-        |surface| paint(surface, raster, page, style),
+        |surface| match NormalizedF32::new(opacity).filter(|alpha| *alpha < NormalizedF32::ONE) {
+            Some(alpha) => {
+                surface.push_opacity(alpha);
+                let painted = paint(surface, raster, page, style);
+                surface.pop();
+                painted
+            }
+            None => paint(surface, raster, page, style),
+        },
     )
     .map(|()| Some(owner))
 }

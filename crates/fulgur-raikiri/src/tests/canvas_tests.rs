@@ -107,3 +107,23 @@ fn background_clip_does_not_shrink_the_canvas() {
         assert_eq!(fills.first(), Some(&[0, 128, 0]), "{clip}: {fills:?}");
     }
 }
+
+#[test]
+fn the_canvas_takes_the_root_opacity() {
+    // Compositing and Blending 1 §3.3.1: the canvas background is painted
+    // into the root element's group, so the root's opacity fades it.
+    let (_dir, path) = input(&format!(
+        "{PAGES}<html style=\"opacity: 0.5; background: rgb(0, 0, 255)\">\
+         <body style=\"margin: 0\"></body></html>"
+    ));
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let operations = page_operations(&pdf, 1);
+    // The faded canvas is drawn through a transparency group, not straight
+    // onto the page.
+    assert!(
+        !operations.iter().any(|op| op.operator == "f")
+            && operations.iter().any(|op| op.operator == "Do"),
+        "{operations:?}"
+    );
+}

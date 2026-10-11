@@ -293,3 +293,26 @@ fn legacy_pages_skip_the_background_given_to_the_canvas() {
     assert_eq!(fill_count(None), 1);
     assert_eq!(fill_count(owner), 0);
 }
+
+#[test]
+fn a_root_without_a_box_gives_no_canvas() {
+    // CSS Backgrounds 3 §2.11: a `display: none` root leaves the canvas
+    // transparent, and its body does not take over.
+    let resources = RenderResources::new();
+    let document = raikiri_html::parse_html_with_resources(
+        &b"<html style='display:none'><body style='background:rgb(0,128,0)'>x</body></html>"[..],
+        &resources,
+    )
+    .unwrap();
+    let LayoutStatus::Completed(layout) = raikiri_html::layout(
+        &document,
+        PageDefaults::default(),
+        LayoutConfig::default(),
+        LayoutOptions::new(),
+    )
+    .unwrap() else {
+        panic!("expected completed layout")
+    };
+    let page = layout.page(0).expect("a page");
+    assert!(canvas::owner(&page).is_none());
+}
