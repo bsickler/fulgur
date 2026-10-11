@@ -232,3 +232,12 @@ fn collapsed_tables_have_square_shadows() {
     assert_eq!(table("collapse"), 0);
     assert!(table("separate") > 0);
 }
+
+#[test]
+fn a_cell_without_a_table_element_keeps_its_shadow() {
+    let (_, ops) = operations(&format!(
+        "{BOX_CSS}<div style='display:table-cell;border-collapse:collapse;\
+         box-shadow:3px 3px rgb(255,0,0)'>a</div>"
+    ));
+    assert_eq!(paints(&ops), ["255,0,0"]);
+}
