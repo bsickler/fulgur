@@ -364,6 +364,10 @@ impl Structure {
         for child in dom.children(node) {
             self.walk(page, dom, child, child_parent, depth + 1, counter);
         }
+        // The last position belongs to the node alone: `::after` content
+        // is keyed there, after every descendant, whatever order the
+        // painter draws them in.
+        *counter += 1;
         self.order.insert(node, (order, *counter - 1));
     }
 

@@ -382,17 +382,12 @@ fn paint_legacy(
     // Content images are replaced content of their pseudo-element, so they
     // go with the other replaced content, below the text.
     for event in events {
-        if let PaintEvent::GeneratedImage(image) = event {
-            paint_generated_image(
-                surface,
-                page,
-                &clips,
-                &mut active,
-                raster,
-                tags,
-                *image,
-                false,
-            )?;
+        if let PaintEvent::GeneratedImage(image) = event
+            && let Some(placement) = raster.generated_image(page, *image)
+        {
+            let chain = clips.chain(page, placement.clip_owner, placement.rect);
+            active.apply(surface, &clips, &chain);
+            paint_content_image(surface, page, raster, tags, *image, &placement, false)?;
         }
     }
     // Text goes above every block background and border.
@@ -552,16 +547,11 @@ fn paint_ordered(
                 }
             }
             PaintEvent::GeneratedImage(image) => {
-                paint_generated_image(
-                    surface,
-                    page,
-                    &clips,
-                    &mut active,
-                    raster,
-                    tags,
-                    *image,
-                    true,
-                )?;
+                if let Some(placement) = raster.generated_image(page, *image) {
+                    let chain = clips.chain(page, placement.clip_owner, placement.rect);
+                    active.apply(surface, &clips, &chain);
+                    paint_content_image(surface, page, raster, tags, *image, &placement, true)?;
+                }
             }
             PaintEvent::PushClip(shape, _) => {
                 // The producer owns column placement and clipping geometry.
@@ -626,27 +616,20 @@ fn paint_ordered(
 }
 
 /// An image of `::before` or `::after` content (CSS Content 3 §2.2), at the
-/// rectangle layout gave it in its line and clipped like the pseudo-element's
-/// other content. An image without pixels draws nothing. `host_group` tells
-/// whether the paint order already drew the owner's opacity group.
-#[allow(clippy::too_many_arguments)]
-fn paint_generated_image(
+/// rectangle layout gave it in its line, marked as its pseudo-element's
+/// content. `host_group` tells whether the paint order already drew the
+/// owner's opacity group.
+fn paint_content_image(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
-    clips: &ClipMap,
-    active: &mut ClipStack,
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     image: GeneratedImageId,
+    placement: &raikiri_html::RasterImage,
     host_group: bool,
 ) -> Result<()> {
-    let Some(placement) = raster.generated_image(page, image) else {
-        return Ok(());
-    };
-    let chain = clips.chain(page, placement.clip_owner, placement.rect);
-    active.apply(surface, clips, &chain);
     tags.mark(surface, page, Target::GeneratedImage(image), |surface| {
-        raster.paint_placement(surface, page, &placement, host_group)
+        raster.paint_placement(surface, page, placement, host_group)
     })
 }
 
