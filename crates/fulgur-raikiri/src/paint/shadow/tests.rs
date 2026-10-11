@@ -52,13 +52,15 @@ fn rasters_take_from_the_budget_and_stop_when_it_is_spent() {
         offset: (0.0, 0.0),
         blur_radius: 2.0,
         color: CssColor::BLACK,
+        scale: RASTER_SCALE,
     };
     let mut budget = Budget::default();
-    let raster = blurred_raster(&path, shadow, &mut budget).expect("a raster");
+    let raster =
+        blurred_raster(&path, tiny_skia::FillRule::Winding, shadow, &mut budget).expect("a raster");
     let used = (raster.pixel_width * raster.pixel_height) as f32;
     assert_eq!(budget.pixels, DOCUMENT_RASTER_PIXELS - used);
     budget.pixels = 10.0;
-    assert!(blurred_raster(&path, shadow, &mut budget).is_none());
+    assert!(blurred_raster(&path, tiny_skia::FillRule::Winding, shadow, &mut budget).is_none());
     assert_eq!(budget.pixels, 10.0);
 }
 
@@ -68,6 +70,7 @@ fn rounded_rasters_stay_within_the_pixel_limit() {
         offset: (0.3, 0.7),
         blur_radius: 0.01,
         color: CssColor::BLACK,
+        scale: RASTER_SCALE,
     };
     // A long, very thin shape: rounding its height up to a pixel must not
     // let the raster grow past the limit.
@@ -76,7 +79,9 @@ fn rounded_rasters_stay_within_the_pixel_limit() {
         builder.push_rect(tiny_skia::Rect::from_xywh(0.25, 0.25, width, height).unwrap());
         let path = builder.finish().unwrap();
         let mut budget = Budget::default();
-        if let Some(raster) = blurred_raster(&path, shadow, &mut budget) {
+        if let Some(raster) =
+            blurred_raster(&path, tiny_skia::FillRule::Winding, shadow, &mut budget)
+        {
             let area = u64::from(raster.pixel_width) * u64::from(raster.pixel_height);
             assert!(area as f32 <= MAX_RASTER_PIXELS, "{width}x{height}: {area}");
         }

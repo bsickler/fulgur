@@ -7,6 +7,7 @@
 //! scaled by [`PX_TO_PT`] once and everything below draws in px.
 
 mod border;
+mod box_shadow;
 mod clip;
 mod decoration;
 mod gradient;
@@ -33,8 +34,8 @@ use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use navigation::PageLink;
 use raikiri_html::computed::{
-    ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
-    ComputedVisualBox, CssColor,
+    ComputedBackgroundImage, ComputedDisplay, ComputedLengthPercentage, ComputedValues,
+    ComputedVisibility, ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
     AnchorIndex, DocumentLayout, FontId, FragmentKind, MarginBox, NodeId, NodeKind, Page,
@@ -360,6 +361,7 @@ fn paint_legacy(
                         fragment.content_rect(),
                         Slice::of(&fragment),
                         style,
+                        Collapse::of(page, fragment.node(), style),
                         text,
                     )
                 },
@@ -437,6 +439,7 @@ fn paint_ordered(
                                 fragment.content_rect(),
                                 Slice::of(fragment),
                                 style,
+                                Collapse::of(page, fragment.node(), style),
                                 text,
                             )
                         },
@@ -459,6 +462,7 @@ fn paint_ordered(
                             None,
                             Slice::generated(piece),
                             piece.style,
+                            Collapse::Separate,
                             text,
                         )
                     },
@@ -686,7 +690,7 @@ fn paint_shadow_layer(
     }
 }
 
-/// Background and borders of one box fragment (`rect` is its border box,
+/// Shadows, background and borders of one box fragment (`rect` is its border box,
 /// `content` the whole element's content box from layout, if known).
 ///
 /// The fragment is drawn as its own box, apart from its broken edges: the
@@ -695,6 +699,7 @@ fn paint_shadow_layer(
 /// not give the size of the unbroken box or the fragment's offset in it.
 /// `text` gives the outlines of the element's text, for
 /// `background-clip: text`.
+#[allow(clippy::too_many_arguments)]
 fn paint_box(
     surface: &mut Surface<'_>,
     raster: &mut raster::RasterCache<'_>,
@@ -702,16 +707,95 @@ fn paint_box(
     content: Option<PaintRect>,
     slice: Slice,
     style: &ComputedValues,
+    collapse: Collapse,
     text: impl FnOnce() -> Option<Path>,
 ) -> Result<()> {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
         return Ok(());
     }
-    let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    let mut border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    if collapse != Collapse::Separate {
+        // CSS Backgrounds 3 §4 (effect on tables): `border-radius` has no
+        // effect on the table and its internal boxes in the collapsing
+        // border model.
+        border_box.radii = [[0.0; 2]; 4];
+    }
+    if collapse != Collapse::Internal {
+        // §7.1: nor do outer shadows on the internal boxes.
+        box_shadow::paint_outer(surface, &border_box, slice, style, &mut raster.box_shadows);
+    }
     let padding = padding(style, rect, content);
     paint_background(surface, raster, &border_box, padding, slice, style, text)?;
+    let padding_box = border_box.inset(slice.edges(border::widths(style)));
+    box_shadow::paint_inset(surface, &padding_box, slice, style, &mut raster.box_shadows);
     border::paint_borders(surface, &border_box, style, slice);
     Ok(())
+}
+
+/// How a box takes part in a table's border model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Collapse {
+    /// Not a table box, or one of a table with separated borders.
+    Separate,
+    /// A table in the collapsing border model.
+    Table,
+    /// An internal box (row, group, column or cell) of such a table.
+    Internal,
+}
+
+impl Collapse {
+    /// The role of `node`, whose style is `style`. The border model is the
+    /// table's: `border-collapse` applies to table boxes only (CSS Tables 3
+    /// §11.2), so an internal box reads it from its nearest table ancestor.
+    fn of(page: &Page<'_>, node: NodeId, style: &ComputedValues) -> Self {
+        let collapses = |style: &ComputedValues| {
+            // The keyword type is not named in the computed layer:
+            // `separate` is the initial value, so anything else is `collapse`.
+            style.border_collapse != ComputedValues::initial().border_collapse
+        };
+        if is_table(style) {
+            return if collapses(style) {
+                Self::Table
+            } else {
+                Self::Separate
+            };
+        }
+        let internal = matches!(
+            style.display,
+            ComputedDisplay::TableRowGroup
+                | ComputedDisplay::TableHeaderGroup
+                | ComputedDisplay::TableFooterGroup
+                | ComputedDisplay::TableRow
+                | ComputedDisplay::TableColumnGroup
+                | ComputedDisplay::TableColumn
+                | ComputedDisplay::TableCell
+        );
+        if !internal {
+            return Self::Separate;
+        }
+        let dom = page.dom();
+        let mut ancestor = dom.parent(node);
+        while let Some(node) = ancestor {
+            if let Some(style) = page.computed(node)
+                && is_table(style)
+            {
+                return if collapses(style) {
+                    Self::Internal
+                } else {
+                    Self::Separate
+                };
+            }
+            ancestor = dom.parent(node);
+        }
+        Self::Separate
+    }
+}
+
+fn is_table(style: &ComputedValues) -> bool {
+    matches!(
+        style.display,
+        ComputedDisplay::Table | ComputedDisplay::InlineTable
+    )
 }
 
 /// CSS Backgrounds 3 §2: the background color, then the background image
