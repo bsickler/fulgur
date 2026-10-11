@@ -205,3 +205,30 @@ fn shadows_shrunk_away_or_without_a_padding_box_draw_nothing() {
     ));
     assert!(paints(&ops).is_empty(), "{:?}", paints(&ops));
 }
+
+#[test]
+fn the_table_decides_the_border_model_of_its_cells() {
+    let cell = |table: &str, cell: &str| {
+        let (_, ops) = operations(&format!(
+            "{BOX_CSS}<table style='border-collapse:{table}'><tr>\
+             <td style='border-collapse:{cell};box-shadow:3px 3px rgb(255,0,0)'>a</td>\
+             </tr></table>"
+        ));
+        paints(&ops)
+    };
+    assert!(cell("collapse", "separate").is_empty());
+    assert_eq!(cell("separate", "collapse"), ["255,0,0"]);
+}
+
+#[test]
+fn collapsed_tables_have_square_shadows() {
+    let table = |collapse: &str| {
+        let (_, ops) = operations(&format!(
+            "{BOX_CSS}<table style='border-collapse:{collapse};border-radius:20px;\
+             box-shadow:0 0 0 5px rgb(255,0,0)'><tr><td>a</td></tr></table>"
+        ));
+        count(&ops, "c")
+    };
+    assert_eq!(table("collapse"), 0);
+    assert!(table("separate") > 0);
+}

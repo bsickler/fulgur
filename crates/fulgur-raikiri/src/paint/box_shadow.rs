@@ -18,9 +18,7 @@ use super::text_clip::PathSink;
 use krilla::geom::PathBuilder;
 use krilla::paint::{Fill, FillRule};
 use krilla::surface::Surface;
-use raikiri_html::computed::{
-    ComputedBoxShadowItem, ComputedDisplay, ComputedValues, CssColor, TextShadowColor,
-};
+use raikiri_html::computed::{ComputedBoxShadowItem, ComputedValues, CssColor, TextShadowColor};
 
 /// Paint the outer shadows of the box whose border box is `border_box`.
 pub(super) fn paint_outer(
@@ -31,9 +29,6 @@ pub(super) fn paint_outer(
     budget: &mut Budget,
 ) {
     // An empty border box is not skipped: its spread shadow can have area.
-    if collapsed_table_part(style) {
-        return;
-    }
     for item in style.box_shadow.iter().rev().filter(|item| !item.inset) {
         let Some(shadow) = Used::of(item, style.color) else {
             continue;
@@ -120,27 +115,6 @@ pub(super) fn paint_inset(
         );
         surface.pop();
     }
-}
-
-/// Whether `style` is an internal table element in the collapsing border
-/// model, where outer shadows have no effect (CSS Backgrounds 3 §7.1).
-fn collapsed_table_part(style: &ComputedValues) -> bool {
-    let internal = matches!(
-        style.display,
-        ComputedDisplay::TableRowGroup
-            | ComputedDisplay::TableHeaderGroup
-            | ComputedDisplay::TableFooterGroup
-            | ComputedDisplay::TableRow
-            | ComputedDisplay::TableColumnGroup
-            | ComputedDisplay::TableColumn
-            | ComputedDisplay::TableCell
-    );
-    // `border-collapse` is inherited from the table, and its keyword type is
-    // not named in the computed layer: `separate` is the initial value, so
-    // anything else is `collapse`.
-    internal
-        && style.box_shadow.iter().any(|item| !item.inset)
-        && style.border_collapse != ComputedValues::initial().border_collapse
 }
 
 /// The used values of one shadow, in CSS px.
