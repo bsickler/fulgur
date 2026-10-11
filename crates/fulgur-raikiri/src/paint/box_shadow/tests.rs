@@ -67,3 +67,22 @@ fn wide_blurs_use_fewer_raster_pixels() {
     assert_eq!(raster_scale(6.0), 2.0);
     assert_eq!(raster_scale(40.0), 1.0);
 }
+
+#[test]
+fn inline_breaks_extend_and_cut_the_sides() {
+    let fragment = RoundedRect::rect(10.0, 0.0, 50.0, 20.0);
+    let slice = Slice {
+        left: true,
+        right: true,
+        bottom: true,
+        ..Slice::default()
+    };
+    let wide = extended(&fragment, slice, 5.0);
+    assert_eq!((wide.x, wide.width, wide.height), (5.0, 60.0, 25.0));
+    let mut area = RoundedRect::rect(-10.0, -10.0, 100.0, 50.0);
+    cut(&mut area, &fragment, slice);
+    assert_eq!(
+        (area.x, area.y, area.width, area.height),
+        (10.0, -10.0, 50.0, 30.0)
+    );
+}

@@ -56,18 +56,18 @@ pub(super) fn paint_outer(
             reach.height + 2.0 * margin,
         );
         cut(&mut visible, border_box, slice);
-        let Some(clip) = ring(&visible, border_box) else {
-            continue;
-        };
-        surface.push_clip_path(&clip, &FillRule::EvenOdd);
-        draw(
-            surface,
-            &shadow,
-            FillRule::NonZero,
-            |sink| shape.append_to(sink),
-            budget,
-        );
-        surface.pop();
+        // `visible` holds the shadow, so the ring is never empty.
+        if let Some(clip) = ring(&visible, border_box) {
+            surface.push_clip_path(&clip, &FillRule::EvenOdd);
+            draw(
+                surface,
+                &shadow,
+                FillRule::NonZero,
+                |sink| shape.append_to(sink),
+                budget,
+            );
+            surface.pop();
+        }
     }
 }
 
@@ -197,9 +197,6 @@ fn draw(
     if shadow.blur > 0.0 {
         let mut path = SkiaPath(tiny_skia::PathBuilder::new());
         append(&mut path);
-        let Some(path) = path.0.finish() else {
-            return;
-        };
         let rule = match rule {
             FillRule::EvenOdd => tiny_skia::FillRule::EvenOdd,
             FillRule::NonZero => tiny_skia::FillRule::Winding,
@@ -210,7 +207,11 @@ fn draw(
             color: shadow.color,
             scale: raster_scale(shadow.blur),
         };
-        if let Some(image) = shadow::blurred_raster(&path, rule, params, budget) {
+        if let Some(image) = path
+            .0
+            .finish()
+            .and_then(|path| shadow::blurred_raster(&path, rule, params, budget))
+        {
             shadow::draw(surface, image);
         }
     } else {

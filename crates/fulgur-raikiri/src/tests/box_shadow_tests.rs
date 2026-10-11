@@ -196,3 +196,12 @@ fn collapsed_table_cells_have_no_outer_shadow() {
     assert_eq!(table("collapse"), ["0,0,255"]);
     assert_eq!(table("separate"), ["255,0,0", "0,0,255"]);
 }
+
+#[test]
+fn shadows_shrunk_away_or_without_a_padding_box_draw_nothing() {
+    let (_, ops) = operations(&format!(
+        "{BOX_CSS}<div style='box-shadow:0 0 0 -60px red, 0 0 4px -60px red'></div>\
+         <div style='width:0;height:0;box-shadow:inset 0 0 0 4px red'></div>"
+    ));
+    assert!(paints(&ops).is_empty(), "{:?}", paints(&ops));
+}
