@@ -316,7 +316,7 @@ fn paint_body(
 ) -> Result<()> {
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
-    if order::supported(&events, &runs) {
+    if order::supported(&events, &runs, |run| page.text_run_opacity_group(run)) {
         paint_ordered(surface, page, &events, &runs, fonts, svg, raster, tags)
     } else {
         paint_legacy(surface, page, &runs, fonts, svg, raster, tags)
@@ -399,9 +399,13 @@ fn paint_ordered(
     let mut active = ClipStack::default();
     let dom = page.dom();
     let mut by_node: HashMap<_, Vec<_>> = HashMap::new();
+    // A line's runs are split by the inline opacity group drawing them.
     let mut by_line: HashMap<_, Vec<_>> = HashMap::new();
     for run in runs {
-        by_line.entry(run.line).or_default().push(run);
+        by_line
+            .entry((run.line, page.text_run_opacity_group(run)))
+            .or_default()
+            .push(run);
         if let RunSource::Text(node) = run.source {
             by_node.entry(node).or_default().push(run);
         }
@@ -414,7 +418,17 @@ fn paint_ordered(
             continue;
         }
         if let PaintEvent::TextLine(line) = event {
-            batch.extend(by_line.get(line).into_iter().flatten().copied());
+            batch.extend(by_line.get(&(*line, None)).into_iter().flatten().copied());
+            continue;
+        }
+        if let PaintEvent::GroupTextLine(line, owner) = event {
+            batch.extend(
+                by_line
+                    .get(&(*line, Some(*owner)))
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
             continue;
         }
         // Clip, opacity, box and stacking steps delimit a text paint batch.
