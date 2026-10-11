@@ -49,12 +49,12 @@ fn style(css: &str) -> ComputedValues {
 }
 
 /// Paint the border image of a 60×40 px box and return whether it replaced
-/// the borders, with the PDF's image and shading counts.
-fn paint_box(
+/// the borders, with the PDF.
+fn paint_pdf(
     style: &ComputedValues,
     source: Option<&dyn ImagePixelSource>,
     slice: Slice,
-) -> (bool, usize, usize) {
+) -> (bool, lopdf::Document) {
     let mut pdf = krilla::Document::new();
     let mut page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
     let mut surface = page.surface();
@@ -69,23 +69,40 @@ fn paint_box(
     .unwrap();
     surface.finish();
     page.finish();
-    let parsed = lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap();
-    let count = |kind: &[u8]| {
-        parsed
-            .objects
-            .values()
-            .filter_map(|object| match object {
-                lopdf::Object::Stream(stream) => Some(&stream.dict),
-                lopdf::Object::Dictionary(dict) => Some(dict),
-                _ => None,
-            })
-            .filter(|dict| {
-                dict.get(b"Subtype").and_then(|value| value.as_name()).ok() == Some(kind)
-                    || (kind == b"Shading" && dict.has(b"ShadingType"))
-            })
-            .count()
-    };
-    (drawn, count(b"Image"), count(b"Shading"))
+    (
+        drawn,
+        lopdf::Document::load_mem(&pdf.finish().unwrap()).unwrap(),
+    )
+}
+
+/// Paint the border image of a 60×40 px box and return whether it replaced
+/// the borders, with the PDF's image and shading counts.
+fn paint_box(
+    style: &ComputedValues,
+    source: Option<&dyn ImagePixelSource>,
+    slice: Slice,
+) -> (bool, usize, usize) {
+    let (drawn, parsed) = paint_pdf(style, source, slice);
+    (drawn, count(&parsed, b"Image"), count(&parsed, b"Shading"))
+}
+
+/// The objects of `parsed` whose subtype is `kind`, or that are shadings or
+/// patterns for those kinds.
+fn count(parsed: &lopdf::Document, kind: &[u8]) -> usize {
+    parsed
+        .objects
+        .values()
+        .filter_map(|object| match object {
+            lopdf::Object::Stream(stream) => Some(&stream.dict),
+            lopdf::Object::Dictionary(dict) => Some(dict),
+            _ => None,
+        })
+        .filter(|dict| {
+            dict.get(b"Subtype").and_then(|value| value.as_name()).ok() == Some(kind)
+                || (kind == b"Shading" && dict.has(b"ShadingType"))
+                || (kind == b"Pattern" && dict.has(b"PatternType"))
+        })
+        .count()
 }
 
 #[test]
@@ -170,4 +187,40 @@ fn a_gradient_with_no_border_widths_draws_nothing_but_hides_the_borders() {
         right: true,
     };
     assert_eq!(paint_box(&style, None, broken), (true, 0, 0));
+}
+
+#[test]
+fn many_tiles_share_one_pattern_per_part() {
+    // 9 px slices from a 9 px image make 1 px tiles: 54 along the top and
+    // bottom, 34 along the sides, so each edge fills one pattern.
+    let style = style("div{border:3px solid blue;border-image:url(frame.png) 3 / 1px repeat}");
+    let pixels = red();
+    let (drawn, parsed) = paint_pdf(&style, Some(&pixels), Slice::default());
+    assert!(drawn);
+    assert_eq!(count(&parsed, b"Image"), 1, "patterns share the image");
+    assert_eq!(count(&parsed, b"Pattern"), 4, "one per edge");
+}
+
+#[test]
+fn a_few_tiles_are_drawn_one_by_one() {
+    let style = style("div{border:3px solid blue;border-image:url(frame.png) 3 stretch}");
+    let pixels = red();
+    let (_, parsed) = paint_pdf(&style, Some(&pixels), Slice::default());
+    assert_eq!(count(&parsed, b"Pattern"), 0);
+}
+
+#[test]
+fn spaced_gradient_tiles_fill_a_pattern_with_gaps() {
+    let style =
+        style("div{border:4px solid;border-image:linear-gradient(red,blue) 25% / 2px space}");
+    let (drawn, parsed) = paint_pdf(&style, None, Slice::default());
+    assert!(drawn);
+    assert!(count(&parsed, b"Pattern") > 0);
+}
+
+#[test]
+fn uniform_steps_need_evenly_spaced_edges() {
+    assert_eq!(uniform_step(&[5.0]), Some(0.0));
+    assert_eq!(uniform_step(&[0.0, 2.0, 4.0]), Some(2.0));
+    assert_eq!(uniform_step(&[0.0, 2.0, 5.0]), None);
 }
