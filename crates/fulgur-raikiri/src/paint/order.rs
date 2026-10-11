@@ -33,6 +33,19 @@ pub(super) fn supported(
                     return false;
                 }
             }
+            PaintEvent::PushTransform(transform) => {
+                let values = [
+                    transform.a,
+                    transform.b,
+                    transform.c,
+                    transform.d,
+                    transform.e,
+                    transform.f,
+                ];
+                if !values.iter().all(|value| value.is_finite()) {
+                    return false;
+                }
+            }
             PaintEvent::ColumnRule(_)
             | PaintEvent::Box(_)
             | PaintEvent::Replaced(_)
@@ -40,7 +53,8 @@ pub(super) fn supported(
             | PaintEvent::GeneratedBox(_)
             | PaintEvent::PushClip(_, _)
             | PaintEvent::PopClip
-            | PaintEvent::PopOpacity => {}
+            | PaintEvent::PopOpacity
+            | PaintEvent::PopTransform => {}
             _ => return false,
         }
     }

@@ -1,5 +1,7 @@
 use super::*;
-use raikiri_html::{GeneratedKind, LayoutConfig, LayoutStatus, PaintEvent, RunSource};
+use raikiri_html::{
+    GeneratedKind, LayoutConfig, LayoutStatus, PaintEvent, PaintTransform, RunSource,
+};
 
 fn document() -> raikiri_html::DocumentLayout {
     let dir = tempfile::tempdir().unwrap();
@@ -151,4 +153,19 @@ fn grouped_runs_need_their_own_group_line() {
     // Each group line is drawn once.
     let twice = [grouped[0], grouped[0]];
     assert!(!supported(&twice, &runs, |_| group));
+}
+
+#[test]
+fn transforms_are_supported_when_finite() {
+    let document = document();
+    let page = document.page(0).unwrap();
+    let mut events = page.paint_order();
+    events.insert(
+        0,
+        PaintEvent::PushTransform(PaintTransform::new(0.0, 1.0, -1.0, 0.0, 5.0, 7.0)),
+    );
+    events.push(PaintEvent::PopTransform);
+    assert!(supported(&events, &page.text_runs(), |_| None));
+    events[0] = PaintEvent::PushTransform(PaintTransform::translate(f32::NAN, 0.0));
+    assert!(!supported(&events, &page.text_runs(), |_| None));
 }
