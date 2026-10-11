@@ -12,15 +12,18 @@
 use super::paint_background;
 use super::raster::RasterCache;
 use super::shape::{Edges, RoundedRect, Slice};
+use crate::tagging::{Tags, Target};
 use fulgur_core::Result;
 use krilla::surface::Surface;
+use krilla::tagging::ArtifactType;
 use raikiri_html::computed::{
     ComputedBackgroundImage, ComputedDisplay, ComputedValues, ComputedVisualBox, CssColor,
 };
 use raikiri_html::{NodeId, NodeKind, Page};
 
-/// The element whose background is the canvas background of `page`.
-pub(super) fn owner(page: &Page<'_>) -> Option<NodeId> {
+/// The element whose background is the canvas background of `page`, with
+/// its computed style.
+pub(super) fn owner<'p>(page: &'p Page<'_>) -> Option<(NodeId, &'p ComputedValues)> {
     let dom = page.dom();
     let element = |node: NodeId, name: &str| {
         dom.kind(node) == Some(NodeKind::Element) && dom.local_name(node) == Some(name)
@@ -31,12 +34,12 @@ pub(super) fn owner(page: &Page<'_>) -> Option<NodeId> {
     if let Some(style) = page.computed(html)
         && has_background(style)
     {
-        return generates_box(style).then_some(html);
+        return generates_box(style).then_some((html, style));
     }
     let body = dom.children(html).find(|&node| element(node, "body"))?;
     page.computed(body)
-        .is_some_and(|style| has_background(style) && generates_box(style))
-        .then_some(body)
+        .filter(|style| has_background(style) && generates_box(style))
+        .map(|style| (body, style))
 }
 
 fn generates_box(style: &ComputedValues) -> bool {
@@ -47,19 +50,36 @@ fn has_background(style: &ComputedValues) -> bool {
     style.background_color.a > 0 || !matches!(style.background_image, ComputedBackgroundImage::None)
 }
 
-/// Paint the background of `owner` over the page area of `page`.
+/// Paint the canvas background of `page`, if any, as an artifact, and return
+/// the element that gave its background to the canvas.
+pub(super) fn paint_page(
+    surface: &mut Surface<'_>,
+    tags: &mut Tags,
+    raster: &mut RasterCache<'_>,
+    page: &Page<'_>,
+) -> Result<Option<NodeId>> {
+    let Some((owner, style)) = owner(page) else {
+        return Ok(None);
+    };
+    tags.mark(
+        surface,
+        page,
+        Target::Artifact(ArtifactType::Other),
+        |surface| paint(surface, raster, page, style),
+    )
+    .map(|()| Some(owner))
+}
+
+/// Paint `style`'s background over the page area of `page`.
 ///
 /// The page area also positions the background image: the painter does not
 /// keep the root element's unbroken box, which the spec uses for that.
-pub(super) fn paint(
+fn paint(
     surface: &mut Surface<'_>,
     raster: &mut RasterCache<'_>,
     page: &Page<'_>,
-    owner: NodeId,
+    style: &ComputedValues,
 ) -> Result<()> {
-    let Some(style) = page.computed(owner) else {
-        return Ok(());
-    };
     let geometry = page.geometry();
     let (page_box, margins) = (geometry.page_box, geometry.margins);
     let area = RoundedRect::rect(
@@ -68,9 +88,6 @@ pub(super) fn paint(
         (page_box.width - margins.left - margins.right).max(0.0),
         (page_box.height - margins.top - margins.bottom).max(0.0),
     );
-    if area.is_empty() {
-        return Ok(());
-    }
     // The page area has no borders or padding of its own: every edge is
     // treated as broken so the owner's are not subtracted.
     let open = Slice {

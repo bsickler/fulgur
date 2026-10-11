@@ -257,7 +257,7 @@ fn legacy_pages_skip_the_background_given_to_the_canvas() {
         panic!("expected completed layout")
     };
     let page = layout.page(0).unwrap();
-    let owner = canvas::owner(&page);
+    let owner = canvas::owner(&page).map(|(owner, _)| owner);
     assert!(owner.is_some());
     // The body paints its own box only when it did not give its background
     // to the canvas.

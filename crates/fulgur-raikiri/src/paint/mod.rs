@@ -209,15 +209,7 @@ impl<'a> Painter<'a> {
 
         tags.begin_page(page);
         // The canvas background goes under everything else on the page.
-        let canvas_owner = canvas::owner(page);
-        if let Some(owner) = canvas_owner {
-            tags.mark(
-                &mut surface,
-                page,
-                Target::Artifact(ArtifactType::Other),
-                |surface| canvas::paint(surface, raster, page, owner),
-            )?;
-        }
+        let canvas_owner = canvas::paint_page(&mut surface, tags, raster, page)?;
         // The margin boxes are drawn before the page body.
         let running = margin::paint(
             &mut surface,
