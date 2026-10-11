@@ -16,9 +16,6 @@ use raikiri_html::PaintRect;
 use raikiri_html::computed::{ComputedBackgroundImage, ComputedValues, Sides};
 use raikiri_html::image_geometry::{BorderImageGeometry, border_image_geometry};
 
-/// The most tiles one part draws; a denser part is left out.
-const MAX_PART_TILES: usize = 100_000;
-
 /// What one tile draws: the sized image, or a gradient over its box.
 enum Source {
     Image(Image),
@@ -98,16 +95,13 @@ fn sides(edges: Edges) -> Sides<f64> {
 /// Draw every tile of every part of `geometry`.
 fn draw(surface: &mut Surface<'_>, geometry: &BorderImageGeometry, source: &Source) {
     let (image_width, image_height) = geometry.image_size;
-    let Some(image_size) = Size::from_wh(image_width as f32, image_height as f32) else {
-        return;
-    };
     for part in &geometry.parts {
-        if part.x.len().saturating_mul(part.y.len()) > MAX_PART_TILES {
-            continue;
-        }
         let (src_x, src_y, src_w, src_h) = part.source;
         let (area_x, area_y, area_w, area_h) = part.area;
-        let (Some(area), Some(source_rect)) = (
+        // Raikiri only returns non-empty parts of a non-empty image, with a
+        // bounded number of tiles each.
+        let (Some(image_size), Some(area), Some(source_rect)) = (
+            Size::from_wh(image_width as f32, image_height as f32),
             RoundedRect::rect(area_x as f32, area_y as f32, area_w as f32, area_h as f32).path(),
             RoundedRect::rect(src_x as f32, src_y as f32, src_w as f32, src_h as f32).path(),
         ) else {

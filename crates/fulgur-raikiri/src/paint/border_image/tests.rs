@@ -134,3 +134,40 @@ fn a_fragment_without_border_widths_draws_nothing_but_hides_the_borders() {
     };
     assert_eq!(paint_box(&style, Some(&pixels), broken), (true, 0, 0));
 }
+
+/// Knows the image's size but cannot decode it at the size asked for.
+struct Undecodable;
+
+impl ImagePixelSource for Undecodable {
+    fn get_decoded(&self, _url: &url::Url) -> Option<Arc<DecodedImage>> {
+        None
+    }
+    fn intrinsic_size(&self, _url: &url::Url) -> Option<raikiri_traits::ImageIntrinsicSize> {
+        Some(raikiri_traits::ImageIntrinsicSize {
+            width: Some(9.0),
+            height: Some(9.0),
+            aspect_ratio: None,
+        })
+    }
+}
+
+#[test]
+fn an_image_that_cannot_be_decoded_leaves_the_borders() {
+    let style = style("div{border:3px solid blue;border-image:url(frame.png) 3}");
+    assert_eq!(
+        paint_box(&style, Some(&Undecodable), Slice::default()),
+        (false, 0, 0)
+    );
+}
+
+#[test]
+fn a_gradient_with_no_border_widths_draws_nothing_but_hides_the_borders() {
+    let style = style("div{border:3px solid blue;border-image:linear-gradient(red,blue) 3}");
+    let broken = Slice {
+        top: true,
+        bottom: true,
+        left: true,
+        right: true,
+    };
+    assert_eq!(paint_box(&style, None, broken), (true, 0, 0));
+}

@@ -300,6 +300,14 @@ mod tests {
     use super::RasterCache;
 
     #[test]
+    fn images_without_a_pixel_source_are_unavailable() {
+        let mut cache = RasterCache::for_tests(None);
+        let url = url::Url::parse("file:///a.png").unwrap();
+        assert!(cache.natural_size("a.png").is_none());
+        assert!(cache.sized_image(&url, 10.0, 10.0).unwrap().is_none());
+    }
+
+    #[test]
     fn local_and_empty_references_resolve_to_nothing() {
         let cache = RasterCache::for_tests(None);
         assert_eq!(cache.resolve("#frag"), None);
