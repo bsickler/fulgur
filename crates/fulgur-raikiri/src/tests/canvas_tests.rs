@@ -130,3 +130,19 @@ fn the_canvas_shares_the_root_opacity_group() {
         "{operations:?}"
     );
 }
+
+#[test]
+fn the_canvas_goes_under_the_margin_boxes() {
+    // CSS Paged Media 3 §5.1: the canvas is painted below the page-margin
+    // boxes, so one that reaches into the page area stays visible.
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 20px; \
+         @top-center { content: 'x'; background: rgb(255, 0, 0) } }</style>\
+         <html style=\"background: rgb(0, 0, 255)\"><body></body></html>",
+    );
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let fills = fills(&page_operations(&pdf, 1));
+    assert_eq!(fills.first(), Some(&[0, 0, 255]), "{fills:?}");
+    assert!(fills.contains(&[255, 0, 0]), "{fills:?}");
+}
