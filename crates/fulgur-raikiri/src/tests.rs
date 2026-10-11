@@ -201,6 +201,76 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
     assert!(!content.contains("1 0 0 rg"), "{content}");
 }
 
+/// The decoded content of each transparency group Form XObject.
+fn group_forms(pdf: &lopdf::Document) -> Vec<String> {
+    pdf.objects
+        .values()
+        .filter_map(|object| object.as_stream().ok())
+        .filter(|stream| {
+            stream.dict.has(b"Group")
+                && stream
+                    .dict
+                    .get(b"Subtype")
+                    .is_ok_and(|t| t.as_name().is_ok_and(|n| n == b"Form"))
+        })
+        .map(|stream| {
+            String::from_utf8_lossy(
+                &stream
+                    .decompressed_content()
+                    .unwrap_or_else(|_| stream.content.clone()),
+            )
+            .into_owned()
+        })
+        .collect()
+}
+
+/// Whether some graphics state sets the fill opacity to `alpha`.
+fn has_fill_opacity(pdf: &lopdf::Document, alpha: f32) -> bool {
+    pdf.objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .any(|dict| dict.get(b"ca").ok().and_then(|value| value.as_float().ok()) == Some(alpha))
+}
+
+#[test]
+fn inline_element_opacity_composites_its_text_and_box_as_a_group() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<p>kept <span style=\"opacity: 0.5; background: rgb(0, 0, 255)\">faded</span> kept</p>"
+    ));
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    // The page itself shows only the paragraph's own text; the span's
+    // text is in the group.
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(
+        text.split_whitespace().collect::<Vec<_>>(),
+        ["kept", "kept"]
+    );
+    assert!(has_fill_opacity(&pdf, 0.5));
+    // The span's background and glyphs are drawn inside one group.
+    let forms = group_forms(&pdf);
+    assert!(
+        forms
+            .iter()
+            .any(|form| form.contains("0 0 1 rg") && form.contains("TJ")),
+        "{forms:?}"
+    );
+}
+
+#[test]
+fn display_contents_opacity_has_no_box_to_apply_to() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<div style=\"display: contents; opacity: 0.5\"><p>block</p></div>\
+         <p>a<span style=\"display: contents; opacity: 0.5\">b</span>c</p>"
+    ));
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(text.split_whitespace().collect::<String>(), "blockabc");
+    assert!(!has_fill_opacity(&pdf, 0.5));
+    assert!(group_forms(&pdf).is_empty());
+}
+
 #[test]
 fn margin_boxes_draw_the_running_element_of_each_page() {
     let (_dir, path) = input(

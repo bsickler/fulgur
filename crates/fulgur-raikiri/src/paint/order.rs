@@ -1,7 +1,13 @@
-use raikiri_html::{PaintEvent, PositionedGlyphRun, RunSource};
+use raikiri_html::{NodeId, PaintEvent, PositionedGlyphRun, RunSource};
 use std::collections::HashSet;
 
-pub(super) fn supported(events: &[PaintEvent<'_>], runs: &[PositionedGlyphRun<'_>]) -> bool {
+/// Whether the ordered events draw every run exactly once. `group` gives the
+/// inline opacity group of a run, which picks the line event drawing it.
+pub(super) fn supported(
+    events: &[PaintEvent<'_>],
+    runs: &[PositionedGlyphRun<'_>],
+    group: impl Fn(&PositionedGlyphRun<'_>) -> Option<NodeId>,
+) -> bool {
     let mut text_nodes = HashSet::new();
     let mut text_lines = HashSet::new();
     let run_lines: HashSet<_> = runs.iter().map(|run| run.line).collect();
@@ -13,7 +19,12 @@ pub(super) fn supported(events: &[PaintEvent<'_>], runs: &[PositionedGlyphRun<'_
                 }
             }
             PaintEvent::TextLine(line) => {
-                if !run_lines.contains(line) || !text_lines.insert(*line) {
+                if !run_lines.contains(line) || !text_lines.insert((*line, None)) {
+                    return false;
+                }
+            }
+            PaintEvent::GroupTextLine(line, owner) => {
+                if !run_lines.contains(line) || !text_lines.insert((*line, Some(*owner))) {
                     return false;
                 }
             }
@@ -37,10 +48,13 @@ pub(super) fn supported(events: &[PaintEvent<'_>], runs: &[PositionedGlyphRun<'_
     if !text_nodes.is_empty() && !text_lines.is_empty() {
         return false;
     }
-    runs.iter().all(|run| match run.source {
-        RunSource::Text(node) => text_lines.contains(&run.line) || text_nodes.contains(&node),
-        RunSource::Generated(_, _) | RunSource::Ellipsis(_) => text_lines.contains(&run.line),
-        _ => false,
+    runs.iter().all(|run| {
+        let line = text_lines.contains(&(run.line, group(run)));
+        match run.source {
+            RunSource::Text(node) => line || text_nodes.contains(&node),
+            RunSource::Generated(_, _) | RunSource::Ellipsis(_) => line,
+            _ => false,
+        }
     })
 }
 

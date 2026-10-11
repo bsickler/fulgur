@@ -20,7 +20,7 @@ fn document() -> raikiri_html::DocumentLayout {
 fn ordinary_text_is_supported() {
     let document = document();
     let page = document.page(0).unwrap();
-    assert!(supported(&page.paint_order(), &page.text_runs()));
+    assert!(supported(&page.paint_order(), &page.text_runs(), |_| None));
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn duplicate_text_events_are_not_drawn_twice() {
         .copied()
         .unwrap();
     events.push(text);
-    assert!(!supported(&events, &page.text_runs()));
+    assert!(!supported(&events, &page.text_runs(), |_| None));
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn missing_text_event_uses_legacy_page() {
         .into_iter()
         .filter(|event| !matches!(event, PaintEvent::Text(_)))
         .collect();
-    assert!(!supported(&events, &page.text_runs()));
+    assert!(!supported(&events, &page.text_runs(), |_| None));
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn generated_run_uses_legacy_page() {
         panic!("text run");
     };
     runs[0].source = RunSource::Generated(node, GeneratedKind::Before);
-    assert!(!supported(&page.paint_order(), &runs));
+    assert!(!supported(&page.paint_order(), &runs, |_| None));
 }
 
 #[test]
@@ -66,13 +66,15 @@ fn invalid_opacity_is_rejected_before_surface_stack_changes() {
     for alpha in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
         assert!(!supported(
             &[PaintEvent::PushOpacity(alpha), PaintEvent::PopOpacity],
-            &[]
+            &[],
+            |_| None
         ));
     }
     for alpha in [0.0, 1.0] {
         assert!(supported(
             &[PaintEvent::PushOpacity(alpha), PaintEvent::PopOpacity],
-            &[]
+            &[],
+            |_| None
         ));
     }
 }
@@ -86,11 +88,11 @@ fn line_events_include_generated_and_ellipsis_runs() {
         panic!("text run")
     };
     let events = page.paint_order_for_text_runs(&runs);
-    assert!(supported(&events, &runs));
+    assert!(supported(&events, &runs, |_| None));
     runs[0].source = RunSource::Generated(node, GeneratedKind::Before);
-    assert!(supported(&events, &runs));
+    assert!(supported(&events, &runs, |_| None));
     runs[0].source = RunSource::Ellipsis(node);
-    assert!(supported(&events, &runs));
+    assert!(supported(&events, &runs, |_| None));
 }
 
 #[test]
@@ -106,15 +108,15 @@ fn duplicate_missing_and_unknown_lines_are_rejected() {
         .unwrap();
     let mut duplicate = events.clone();
     duplicate.push(line);
-    assert!(!supported(&duplicate, &runs));
+    assert!(!supported(&duplicate, &runs, |_| None));
     let mut missing = events.clone();
     missing.retain(|event| !matches!(event, PaintEvent::TextLine(_)));
-    assert!(!supported(&missing, &runs));
+    assert!(!supported(&missing, &runs, |_| None));
     let mut unknown_line = runs[0].line;
     unknown_line.index += 100;
     let mut unknown = events;
     unknown.push(PaintEvent::TextLine(unknown_line));
-    assert!(!supported(&unknown, &runs));
+    assert!(!supported(&unknown, &runs, |_| None));
 }
 
 #[test]
@@ -128,5 +130,25 @@ fn mixed_fragment_and_line_events_are_rejected() {
             .into_iter()
             .filter(|event| matches!(event, PaintEvent::Text(_))),
     );
-    assert!(!supported(&events, &runs));
+    assert!(!supported(&events, &runs, |_| None));
+}
+
+#[test]
+fn grouped_runs_need_their_own_group_line() {
+    let document = document();
+    let page = document.page(0).unwrap();
+    let runs = page.text_runs();
+    let line = runs[0].line;
+    let RunSource::Text(node) = runs[0].source else {
+        panic!("text run")
+    };
+    let group = Some(node);
+    let grouped = [PaintEvent::GroupTextLine(line, node)];
+    assert!(supported(&grouped, &runs, |_| group));
+    // A paragraph line does not draw grouped runs, nor the reverse.
+    assert!(!supported(&[PaintEvent::TextLine(line)], &runs, |_| group));
+    assert!(!supported(&grouped, &runs, |_| None));
+    // Each group line is drawn once.
+    let twice = [grouped[0], grouped[0]];
+    assert!(!supported(&twice, &runs, |_| group));
 }

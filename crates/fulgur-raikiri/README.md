@@ -99,16 +99,21 @@ omitted. Empty or missing drawable boxes use the first rendered descendant.
 defaults to `open` as in CSS GCPM 3, unlike the Blitz backend, whose outline
 always starts collapsed. Labels may also use `counter()`, `counters()` and
 `string()`: counters take their value at the heading, and `string()` takes the
-latest `string-set` assignment at or before it in document order. Page counters
-and general display:contents box suppression are not implemented in this
-backend. Aborted layout or callback errors return no PDF.
+latest `string-set` assignment at or before it in document order. A heading
+with `display: contents` has no box of its own and links to its first rendered
+descendant. Page counters are not implemented in this backend. Aborted layout
+or callback errors return no PDF.
 
 Raikiri pages use paint order with one text event per paragraph line from the
 page's positioned runs. Source text, generated content and ellipses share their
 ancestor opacity groups, which composite overlapping descendants once. Rounded
 and axis-aware clips retain the existing geometry. Duplicate, unknown or missing
 line events and unknown run sources use legacy rendering for the entire page.
-Inline element opacity and other replaced content remain unsupported. Generated
+A non-atomic inline element with opacity below one is its own group: its inline
+boxes, text, atomic inlines and nested groups composite together after the rest
+of its paragraph, and Raikiri tells which group draws each run. An element with
+`display: contents` has no box, so it paints no background or border and its
+opacity forms no group. Other replaced content remains unsupported. Generated
 text and ellipses have no decoration segments in this API version.
 
 Multi-column rules use Raikiri's physical rectangles, used widths, styles,
