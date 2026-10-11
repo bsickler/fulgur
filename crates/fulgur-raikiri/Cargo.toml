@@ -17,9 +17,9 @@ usvg = "0.45"
 tiny-skia = "0.11"
 skrifa = "0.47"
 fulgur-core = { path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "5e8626646641e019292f2ef4b4abaffbee98faca" }
-raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "5e8626646641e019292f2ef4b4abaffbee98faca" }
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "5e8626646641e019292f2ef4b4abaffbee98faca" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri", rev = "081d8ac1ffaef10aa409abda7eac64c31256a6d9" }
+raikiri-net = { git = "https://github.com/fulgur-rs/raikiri", rev = "081d8ac1ffaef10aa409abda7eac64c31256a6d9" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri", rev = "081d8ac1ffaef10aa409abda7eac64c31256a6d9" }
 url = "2.5"
 percent-encoding = "2"
 lopdf = "0.42"

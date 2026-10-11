@@ -445,6 +445,29 @@ fn gradients_produce_axial_and_radial_shadings() {
 }
 
 #[test]
+fn border_images_replace_the_border_styles() {
+    let blue_fill = |operations: &[lopdf::content::Operation]| {
+        operations.iter().any(|operation| {
+            operation.operator == "rg"
+                && operation
+                    .operands
+                    .iter()
+                    .map(|operand| operand.as_float().unwrap_or(-1.0))
+                    .eq([0.0, 0.0, 1.0])
+        })
+    };
+    let border = "border: 10px solid rgb(0, 0, 255)";
+    let (pdf, plain) = operations(&format!("{CSS}<p style=\"{border}\"></p>"));
+    assert!(blue_fill(&plain));
+    assert!(!has_shading(&pdf, 2));
+    let (pdf, imaged) = operations(&format!(
+        "{CSS}<p style=\"{border}; border-image: linear-gradient(red, green) 30% round\"></p>"
+    ));
+    assert!(!blue_fill(&imaged));
+    assert!(has_shading(&pdf, 2));
+}
+
+#[test]
 fn overflow_hidden_clips_descendants_to_the_padding_box() {
     let child = "<div style=\"height: 100px; background-color: blue\">text</div>";
     let (_, visible) = operations(&format!(

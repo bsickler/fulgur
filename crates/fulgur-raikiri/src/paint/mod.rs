@@ -7,6 +7,7 @@
 //! scaled by [`PX_TO_PT`] once and everything below draws in px.
 
 mod border;
+mod border_image;
 mod clip;
 mod decoration;
 mod gradient;
@@ -710,7 +711,9 @@ fn paint_box(
     let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
     let padding = padding(style, rect, content);
     paint_background(surface, raster, &border_box, padding, slice, style, text)?;
-    border::paint_borders(surface, &border_box, style, slice);
+    if !border_image::paint(surface, raster, rect, slice, style)? {
+        border::paint_borders(surface, &border_box, style, slice);
+    }
     Ok(())
 }
 
