@@ -339,31 +339,22 @@ fn paint_body(
 ) -> Result<()> {
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
-    if order::supported(&events, &runs, |run| page.text_run_opacity_group(run)) {
-        paint_ordered(
-            surface,
-            page,
-            &events,
-            &runs,
-            fonts,
-            svg,
-            raster,
-            tags,
-            canvas_owner,
-        )
+    let paint = if order::supported(&events, &runs, |run| page.text_run_opacity_group(run)) {
+        paint_ordered
     } else {
-        paint_legacy(
-            surface,
-            page,
-            &events,
-            &runs,
-            fonts,
-            svg,
-            raster,
-            tags,
-            canvas_owner,
-        )
-    }
+        paint_legacy
+    };
+    paint(
+        surface,
+        page,
+        &events,
+        &runs,
+        fonts,
+        svg,
+        raster,
+        tags,
+        canvas_owner,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
