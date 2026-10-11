@@ -561,6 +561,20 @@ fn generated_content_and_marker_images_are_tagged() {
 }
 
 #[test]
+fn generated_content_images_are_tagged_in_reading_order() {
+    let image = "url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+                 width='8' height='8'><rect width='8' height='8'/></svg>\")";
+    let pdf = tagged_pdf(
+        &format!(
+            "<style>p::before{{content:{image}}} p::after{{content:{image}}}</style>\
+             <p>Body</p>"
+        ),
+        &tagged(),
+    );
+    assert_eq!(outline(&pdf), "Document[P[# # #]]");
+}
+
+#[test]
 fn links_are_named_by_nested_image_alt_text() {
     let pdf = tagged_pdf(
         "<p><a href='https://example.com/'><span> \
