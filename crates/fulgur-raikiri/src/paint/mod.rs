@@ -208,8 +208,6 @@ impl<'a> Painter<'a> {
         surface.push_transform(&Transform::from_scale(PX_TO_PT, PX_TO_PT));
 
         tags.begin_page(page);
-        // The canvas background goes under everything else on the page.
-        let canvas_owner = canvas::paint_page(&mut surface, tags, raster, page)?;
         // The margin boxes are drawn before the page body.
         let running = margin::paint(
             &mut surface,
@@ -220,7 +218,17 @@ impl<'a> Painter<'a> {
             raster,
             tags,
         )?;
+        // The canvas goes under the page body, in the root element's group
+        // with it, so the root's opacity fades the two together.
+        let group = canvas::root_opacity(page);
+        if let Some(alpha) = group {
+            surface.push_opacity(alpha);
+        }
+        let canvas_owner = canvas::paint_page(&mut surface, tags, raster, page)?;
         paint_body(&mut surface, page, fonts, svg, raster, tags, canvas_owner)?;
+        if group.is_some() {
+            surface.pop();
+        }
 
         surface.pop();
         surface.finish();

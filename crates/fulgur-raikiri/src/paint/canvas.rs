@@ -75,26 +75,25 @@ pub(super) fn paint_page(
     let Some((owner, style)) = owner(page) else {
         return Ok(None);
     };
-    // The canvas is painted into the root element's group, so the root's
-    // opacity applies to it (Compositing and Blending 1 §3.3.1).
-    let opacity = root(page)
-        .and_then(|html| page.computed(html))
-        .map_or(1.0, |style| style.opacity);
     tags.mark(
         surface,
         page,
         Target::Artifact(ArtifactType::Other),
-        |surface| match NormalizedF32::new(opacity).filter(|alpha| *alpha < NormalizedF32::ONE) {
-            Some(alpha) => {
-                surface.push_opacity(alpha);
-                let painted = paint(surface, raster, page, style);
-                surface.pop();
-                painted
-            }
-            None => paint(surface, raster, page, style),
-        },
+        |surface| paint(surface, raster, page, style),
     )
     .map(|()| Some(owner))
+}
+
+/// The opacity of the root element's group, when it fades.
+///
+/// The paint order starts at the body, so the root's group, which holds the
+/// canvas as well as the page content, is left to the page painter
+/// (Compositing and Blending 1 §3.3.1).
+pub(super) fn root_opacity(page: &Page<'_>) -> Option<NormalizedF32> {
+    root(page)
+        .and_then(|html| page.computed(html))
+        .and_then(|style| NormalizedF32::new(style.opacity))
+        .filter(|alpha| *alpha < NormalizedF32::ONE)
 }
 
 /// Paint `style`'s background over the page area of `page`.

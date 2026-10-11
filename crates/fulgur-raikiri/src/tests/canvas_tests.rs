@@ -109,21 +109,24 @@ fn background_clip_does_not_shrink_the_canvas() {
 }
 
 #[test]
-fn the_canvas_takes_the_root_opacity() {
+fn the_canvas_shares_the_root_opacity_group() {
     // Compositing and Blending 1 §3.3.1: the canvas background is painted
-    // into the root element's group, so the root's opacity fades it.
+    // into the root element's group, with the root's content, so the root's
+    // opacity fades the two together.
     let (_dir, path) = input(&format!(
         "{PAGES}<html style=\"opacity: 0.5; background: rgb(0, 0, 255)\">\
-         <body style=\"margin: 0\"></body></html>"
+         <body style=\"margin: 0\">\
+         <div style=\"height: 50px; background: rgb(255, 0, 0)\"></div>\
+         </body></html>"
     ));
     let bytes = render(&path, &Config::default()).expect("PDF bytes");
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let operations = page_operations(&pdf, 1);
-    // The faded canvas is drawn through a transparency group, not straight
-    // onto the page.
+    // The canvas and the content are drawn through one transparency group,
+    // not straight onto the page.
     assert!(
         !operations.iter().any(|op| op.operator == "f")
-            && operations.iter().any(|op| op.operator == "Do"),
+            && operations.iter().filter(|op| op.operator == "Do").count() == 1,
         "{operations:?}"
     );
 }
