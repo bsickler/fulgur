@@ -1,5 +1,7 @@
 use super::*;
-use raikiri_html::{GeneratedKind, LayoutConfig, LayoutStatus, PaintEvent, RunSource};
+use raikiri_html::{
+    GeneratedKind, LayoutConfig, LayoutStatus, PaintEvent, PaintTransform, RunSource,
+};
 
 fn document() -> raikiri_html::DocumentLayout {
     let dir = tempfile::tempdir().unwrap();
@@ -129,4 +131,19 @@ fn mixed_fragment_and_line_events_are_rejected() {
             .filter(|event| matches!(event, PaintEvent::Text(_))),
     );
     assert!(!supported(&events, &runs));
+}
+
+#[test]
+fn transforms_are_supported_when_finite() {
+    let document = document();
+    let page = document.page(0).unwrap();
+    let mut events = page.paint_order();
+    events.insert(
+        0,
+        PaintEvent::PushTransform(PaintTransform::new(0.0, 1.0, -1.0, 0.0, 5.0, 7.0)),
+    );
+    events.push(PaintEvent::PopTransform);
+    assert!(supported(&events, &page.text_runs()));
+    events[0] = PaintEvent::PushTransform(PaintTransform::translate(f32::NAN, 0.0));
+    assert!(!supported(&events, &page.text_runs()));
 }

@@ -1653,3 +1653,72 @@ fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
         clip_bounds(&operations)
     );
 }
+
+/// The `cm` operands of `operations` that come before a fill in `color`,
+/// within the same graphics state.
+fn fill_transforms(operations: &[lopdf::content::Operation], color: [f32; 3]) -> Vec<[f32; 6]> {
+    let mut found = Vec::new();
+    let mut current: Option<[f32; 6]> = None;
+    for operation in operations {
+        let values: Vec<f32> = operation
+            .operands
+            .iter()
+            .filter_map(|value| value.as_float().ok())
+            .collect();
+        match operation.operator.as_str() {
+            "cm" => current = values.try_into().ok(),
+            "Q" => current = None,
+            "rg" if values == color => found.extend(current),
+            _ => {}
+        }
+    }
+    found
+}
+
+fn close(actual: [f32; 6], expected: [f32; 6]) -> bool {
+    actual
+        .iter()
+        .zip(expected)
+        .all(|(actual, expected)| (actual - expected).abs() < 1e-3)
+}
+
+#[test]
+fn translated_boxes_move_their_background_with_their_text() {
+    let (pdf, operations) = operations(&format!(
+        "{CSS}<div style=\"height: 40px; background-color: blue; transform: translate(10px, 4px)\">\
+         <p>moved</p></div>"
+    ));
+    // The page's px space (scaled by 0.75 with y flipped) moved by
+    // (10px, 4px), for the background and the text alike.
+    let moved = [0.75, 0.0, 0.0, -0.75, 7.5, 147.0];
+    let backgrounds = fill_transforms(&operations, [0.0, 0.0, 1.0]);
+    assert!(
+        backgrounds.iter().any(|&cm| close(cm, moved)),
+        "{backgrounds:?}"
+    );
+    let texts = fill_transforms(&operations, [0.0, 0.0, 0.0]);
+    assert!(texts.iter().any(|&cm| close(cm, moved)), "{texts:?}");
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("moved"), "{text}");
+}
+
+#[test]
+fn rotated_boxes_draw_their_background_and_text_turned() {
+    let (pdf, operations) = operations(&format!(
+        "{CSS}<div style=\"height: 40px; background-color: blue; transform: rotate(30deg)\">\
+         <p>turned</p></div>"
+    ));
+    let (sin, cos) = 30f32.to_radians().sin_cos();
+    let turned = |cm: [f32; 6]| {
+        (cm[0] - 0.75 * cos).abs() < 1e-3
+            && (cm[1] + 0.75 * sin).abs() < 1e-3
+            && (cm[2] + 0.75 * sin).abs() < 1e-3
+            && (cm[3] + 0.75 * cos).abs() < 1e-3
+    };
+    let backgrounds = fill_transforms(&operations, [0.0, 0.0, 1.0]);
+    assert!(backgrounds.iter().copied().any(turned), "{backgrounds:?}");
+    let texts = fill_transforms(&operations, [0.0, 0.0, 0.0]);
+    assert!(texts.iter().copied().any(turned), "{texts:?}");
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("turned"), "{text}");
+}

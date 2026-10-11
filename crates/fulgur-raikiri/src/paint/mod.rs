@@ -19,6 +19,7 @@ mod shadow;
 mod shape;
 mod svg;
 mod text_clip;
+mod transform;
 
 use crate::tagging::{Tags, Target};
 use clip::{ClipMap, ClipStack};
@@ -39,7 +40,7 @@ use raikiri_html::computed::{
 };
 use raikiri_html::{
     AnchorIndex, DocumentLayout, FontId, FragmentKind, MarginBox, NodeId, NodeKind, Page,
-    PaintEvent, PaintRect, PositionedGlyphRun, RunSource, TextShadow,
+    PaintEvent, PaintRect, PaintTransform, PositionedGlyphRun, RunSource, TextShadow,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -348,7 +349,7 @@ fn paint_legacy(
             // A box's own overflow clips its content, not its decorations.
             let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
             active.apply(surface, &clips, &chain);
-            let text = || text_clip::outlines(dom, fragment.node(), runs);
+            let text = || text_clip::outlines(dom, fragment.node(), runs, PaintTransform::IDENTITY);
             tags.mark(
                 surface,
                 page,
@@ -376,7 +377,18 @@ fn paint_legacy(
     }
     // Text goes above every block background and border.
     let text: Vec<_> = runs.iter().collect();
-    paint_text_batch(surface, page, &clips, &mut active, &text, fonts, tags);
+    // This painter draws boxes where layout put them, and text where the
+    // built-in painter draws it.
+    paint_text_batch(
+        surface,
+        page,
+        &clips,
+        &mut active,
+        &text,
+        PaintTransform::IDENTITY,
+        fonts,
+        tags,
+    );
     active.clear(surface);
     Ok(())
 }
@@ -408,7 +420,11 @@ fn paint_ordered(
     }
     let mut batch = Vec::new();
     let mut event_clips = Vec::new();
+    // The enclosing transforms composed, outermost first; the last one is
+    // the space the current events are drawn in.
+    let mut spaces = vec![PaintTransform::IDENTITY];
     for event in events {
+        let space = *spaces.last().unwrap_or(&PaintTransform::IDENTITY);
         if let PaintEvent::Text(fragment) = event {
             batch.extend(by_node.get(&fragment.node()).into_iter().flatten().copied());
             continue;
@@ -417,8 +433,18 @@ fn paint_ordered(
             batch.extend(by_line.get(line).into_iter().flatten().copied());
             continue;
         }
-        // Clip, opacity, box and stacking steps delimit a text paint batch.
-        paint_text_batch(surface, page, &clips, &mut active, &batch, fonts, tags);
+        // Clip, opacity, transform, box and stacking steps delimit a text
+        // paint batch.
+        paint_text_batch(
+            surface,
+            page,
+            &clips,
+            &mut active,
+            &batch,
+            space,
+            fonts,
+            tags,
+        );
         batch.clear();
         match event {
             PaintEvent::Box(fragment) => {
@@ -426,7 +452,7 @@ fn paint_ordered(
                     let chain =
                         clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
                     active.apply(surface, &clips, &chain);
-                    let text = || text_clip::outlines(dom, fragment.node(), runs);
+                    let text = || text_clip::outlines(dom, fragment.node(), runs, space);
                     tags.mark(
                         surface,
                         page,
@@ -493,7 +519,12 @@ fn paint_ordered(
             }
             PaintEvent::PushClip(shape, _) => {
                 // The producer owns column placement and clipping geometry.
-                let path = clip::clip_path(*shape, page.geometry().page_box);
+                // An open axis extends over the page, wherever the enclosing
+                // transforms put it.
+                let page_box = page.geometry().page_box;
+                let bounds = transform::inverse(space)
+                    .map_or(page_box, |inverse| transform::bounds(inverse, page_box));
+                let path = clip::clip_path(*shape, bounds);
                 if let Some(path) = &path {
                     active.clear(surface);
                     surface.push_clip_path(path, &FillRule::NonZero);
@@ -518,12 +549,32 @@ fn paint_ordered(
                 active.clear(surface);
                 surface.pop();
             }
+            PaintEvent::PushTransform(own) => {
+                // Transforms share the surface stack with clips and groups.
+                active.clear(surface);
+                surface.push_transform(&transform::to_krilla(*own));
+                spaces.push(space * *own);
+            }
+            PaintEvent::PopTransform => {
+                active.clear(surface);
+                surface.pop();
+                spaces.pop();
+            }
             // Clips are applied lazily before each content draw.
             // Other events have already been rejected by `order::supported`.
             _ => {}
         }
     }
-    paint_text_batch(surface, page, &clips, &mut active, &batch, fonts, tags);
+    paint_text_batch(
+        surface,
+        page,
+        &clips,
+        &mut active,
+        &batch,
+        *spaces.last().unwrap_or(&PaintTransform::IDENTITY),
+        fonts,
+        tags,
+    );
     active.clear(surface);
     Ok(())
 }
@@ -551,12 +602,17 @@ fn paint_replaced(
 
 /// Keep the line's decorations below or above all neighboring glyph ink,
 /// and the line's text shadows below both.
+///
+/// The surface draws in `space`, the enclosing paint transforms; a run
+/// whose own transform differs is moved from that space to its own.
+#[allow(clippy::too_many_arguments)]
 fn paint_text_batch(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
     clips: &ClipMap,
     active: &mut ClipStack,
     runs: &[&PositionedGlyphRun<'_>],
+    space: PaintTransform,
     fonts: &mut FontCache,
     tags: &mut Tags,
 ) {
@@ -585,6 +641,7 @@ fn paint_text_batch(
                 active,
                 &runs,
                 layer,
+                space,
                 &mut fonts.shadows,
                 tags,
             );
@@ -597,20 +654,27 @@ fn paint_text_batch(
             for run in &runs {
                 let chain = run_clip_chain(page, clips, run);
                 active.apply(surface, clips, &chain);
+                let moved = transform::relative(space, run.transform);
                 if let Some(phase) = phase {
                     if !run.decorations.is_empty() {
                         tags.mark(
                             surface,
                             page,
                             Target::Artifact(ArtifactType::Other),
-                            |surface| decoration::paint(surface, &run.decorations, phase),
+                            |surface| {
+                                transform::with(surface, moved, |surface| {
+                                    decoration::paint(surface, &run.decorations, phase)
+                                })
+                            },
                         );
                     }
                 } else if paints_glyphs(run) || (tags.enabled() && has_glyphs(run)) {
                     // Transparent text is still content: tagged output
                     // draws it at zero opacity so that it stays readable.
                     tags.mark(surface, page, Target::Run(run), |surface| {
-                        paint_glyph_run(surface, run, fonts)
+                        transform::with(surface, moved, |surface| {
+                            paint_glyph_run(surface, run, fonts)
+                        })
                     });
                 }
             }
@@ -652,25 +716,40 @@ fn paint_shadow_layer(
     active: &mut ClipStack,
     runs: &[&PositionedGlyphRun<'_>],
     layer: usize,
+    space: PaintTransform,
     budget: &mut shadow::Budget,
     tags: &mut Tags,
 ) {
+    type Key = (TextShadow, Vec<clip::ClipKey>, Option<PaintTransform>);
     let mut group: Vec<&PositionedGlyphRun<'_>> = Vec::new();
-    let mut current: Option<(TextShadow, Vec<clip::ClipKey>)> = None;
+    let mut current: Option<Key> = None;
+    let mut paint = |surface: &mut Surface<'_>,
+                     active: &mut ClipStack,
+                     (shadow, chain, moved): Key,
+                     group: &[&PositionedGlyphRun<'_>]| {
+        active.apply(surface, clips, &chain);
+        tags.mark(
+            surface,
+            page,
+            Target::Artifact(ArtifactType::Other),
+            |surface| {
+                transform::with(surface, moved, |surface| {
+                    shadow::paint(surface, group, &shadow, budget)
+                })
+            },
+        );
+    };
     for &run in runs {
-        let next = run
-            .shadows
-            .get(layer)
-            .map(|shadow| (*shadow, run_clip_chain(page, clips, run)));
+        let next = run.shadows.get(layer).map(|shadow| {
+            (
+                *shadow,
+                run_clip_chain(page, clips, run),
+                transform::relative(space, run.transform),
+            )
+        });
         if next != current {
-            if let Some((shadow, chain)) = current.take() {
-                active.apply(surface, clips, &chain);
-                tags.mark(
-                    surface,
-                    page,
-                    Target::Artifact(ArtifactType::Other),
-                    |surface| shadow::paint(surface, &group, &shadow, budget),
-                );
+            if let Some(key) = current.take() {
+                paint(surface, active, key, &group);
             }
             group.clear();
             current = next;
@@ -679,14 +758,8 @@ fn paint_shadow_layer(
             group.push(run);
         }
     }
-    if let Some((shadow, chain)) = current {
-        active.apply(surface, clips, &chain);
-        tags.mark(
-            surface,
-            page,
-            Target::Artifact(ArtifactType::Other),
-            |surface| shadow::paint(surface, &group, &shadow, budget),
-        );
+    if let Some(key) = current {
+        paint(surface, active, key, &group);
     }
 }
 

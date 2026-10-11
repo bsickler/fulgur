@@ -3,7 +3,7 @@
 //! of the element's text.
 
 use krilla::geom::{Path, PathBuilder};
-use raikiri_html::{DomView, GeneratedBox, NodeId, PositionedGlyphRun, RunSource};
+use raikiri_html::{DomView, GeneratedBox, NodeId, PaintTransform, PositionedGlyphRun, RunSource};
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
@@ -20,10 +20,13 @@ pub(super) fn run_element(dom: DomView<'_>, run: &PositionedGlyphRun<'_>) -> Opt
 
 /// The outlines of every glyph in `runs` whose element is `element` or one
 /// of its descendants, or `None` when there are none.
+///
+/// The outlines are in `space`, where the element's box is drawn.
 pub(super) fn outlines(
     dom: DomView<'_>,
     element: NodeId,
     runs: &[PositionedGlyphRun<'_>],
+    space: PaintTransform,
 ) -> Option<Path> {
     let mut pen = Pen::new(PathBuilder::new());
     for run in runs {
@@ -36,6 +39,7 @@ pub(super) fn outlines(
             }
         };
         if inside {
+            pen.transform = super::transform::relative(space, run.transform);
             append_run(&mut pen, run, true);
         }
     }
@@ -131,6 +135,8 @@ pub(super) struct Pen<B> {
     x: f32,
     y: f32,
     skew: f32,
+    /// Moves the outlines from the run's coordinates, if they differ.
+    transform: Option<PaintTransform>,
 }
 
 impl<B> Pen<B> {
@@ -140,11 +146,14 @@ impl<B> Pen<B> {
             x: 0.0,
             y: 0.0,
             skew: 0.0,
+            transform: None,
         }
     }
 
     fn point(&self, x: f32, y: f32) -> (f32, f32) {
-        (self.x + x + y * self.skew, self.y - y)
+        let point = (self.x + x + y * self.skew, self.y - y);
+        self.transform
+            .map_or(point, |transform| transform.apply(point))
     }
 }
 
