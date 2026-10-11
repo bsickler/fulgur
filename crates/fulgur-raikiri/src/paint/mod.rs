@@ -41,8 +41,9 @@ use raikiri_html::computed::{
     ComputedVisibility, ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
-    AnchorIndex, DocumentLayout, FontId, FragmentKind, MarginBox, NodeId, NodeKind, Page,
-    PaintEvent, PaintRect, PaintTransform, PositionedGlyphRun, RunSource, TextShadow,
+    AnchorIndex, DocumentLayout, FontId, FragmentKind, GeneratedImageId, MarginBox, NodeId,
+    NodeKind, Page, PaintEvent, PaintRect, PaintTransform, PositionedGlyphRun, RunSource,
+    TextShadow,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -351,7 +352,17 @@ fn paint_body(
             canvas_owner,
         )
     } else {
-        paint_legacy(surface, page, &runs, fonts, svg, raster, tags, canvas_owner)
+        paint_legacy(
+            surface,
+            page,
+            &events,
+            &runs,
+            fonts,
+            svg,
+            raster,
+            tags,
+            canvas_owner,
+        )
     }
 }
 
@@ -359,6 +370,7 @@ fn paint_body(
 fn paint_legacy(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
+    events: &[PaintEvent<'_>],
     runs: &[PositionedGlyphRun<'_>],
     fonts: &mut FontCache,
     svg: &mut svg::SvgCache<'_>,
@@ -414,6 +426,17 @@ fn paint_legacy(
         active.apply(surface, &clips, &chain);
         // This painter has no opacity groups, so the SVG keeps its root opacity.
         paint_replaced(surface, page, &fragment, svg, raster, tags, false)?;
+    }
+    // Content images are replaced content of their pseudo-element, so they
+    // go with the other replaced content, below the text.
+    for event in events {
+        if let PaintEvent::GeneratedImage(image) = event
+            && let Some(placement) = raster.generated_image(page, *image)
+        {
+            let chain = clips.chain(page, placement.clip_owner, placement.rect);
+            active.apply(surface, &clips, &chain);
+            paint_content_image(surface, page, raster, tags, *image, &placement, false)?;
+        }
     }
     // Text goes above every block background and border.
     let text: Vec<_> = runs.iter().collect();
@@ -579,6 +602,13 @@ fn paint_ordered(
                     })?;
                 }
             }
+            PaintEvent::GeneratedImage(image) => {
+                if let Some(placement) = raster.generated_image(page, *image) {
+                    let chain = clips.chain(page, placement.clip_owner, placement.rect);
+                    active.apply(surface, &clips, &chain);
+                    paint_content_image(surface, page, raster, tags, *image, &placement, true)?;
+                }
+            }
             PaintEvent::PushClip(shape, _) => {
                 // The producer owns column placement and clipping geometry.
                 // An open axis extends over the page, wherever the enclosing
@@ -639,6 +669,24 @@ fn paint_ordered(
     );
     active.clear(surface);
     Ok(())
+}
+
+/// An image of `::before` or `::after` content (CSS Content 3 §2.2), at the
+/// rectangle layout gave it in its line, marked as its pseudo-element's
+/// content. `host_group` tells whether the paint order already drew the
+/// owner's opacity group.
+fn paint_content_image(
+    surface: &mut Surface<'_>,
+    page: &Page<'_>,
+    raster: &mut raster::RasterCache<'_>,
+    tags: &mut Tags,
+    image: GeneratedImageId,
+    placement: &raikiri_html::RasterImage,
+    host_group: bool,
+) -> Result<()> {
+    tags.mark(surface, page, Target::GeneratedImage(image), |surface| {
+        raster.paint_placement(surface, page, placement, host_group)
+    })
 }
 
 /// The content of a replaced element, marked as that element's content.

@@ -29,6 +29,7 @@ fn legacy_pages_keep_inline_svg_root_opacity() {
     paint_legacy(
         &mut surface,
         &page,
+        &page.paint_order(),
         &page.text_runs(),
         &mut fonts,
         &mut svg,
@@ -75,6 +76,7 @@ fn legacy_pages_keep_inline_svg_vectors() {
     paint_legacy(
         &mut surface,
         &page,
+        &page.paint_order(),
         &page.text_runs(),
         &mut fonts,
         &mut svg,
@@ -271,6 +273,7 @@ fn legacy_pages_skip_the_background_given_to_the_canvas() {
         paint_legacy(
             &mut surface,
             &page,
+            &page.paint_order(),
             &page.text_runs(),
             &mut fonts,
             &mut svg,
