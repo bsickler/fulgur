@@ -169,6 +169,19 @@ share a budget of 64M pixels. Shadows are not applied to text decorations,
 page-margin box text has no shadows, and glyphs without outlines (bitmap, SVG
 and color-only emoji glyphs) cast no shadow.
 
+Box shadows come from the computed `box-shadow` list, with `currentcolor`
+resolved against the element's color, and are painted last declared first so
+the first one is on top. Outer shadows paint below the background and show
+only outside the border box; `inset` shadows paint between the background and
+the border, inside the padding box. The spread distance grows or shrinks the
+corner radii as CSS Backgrounds 3 §7.1.1 describes, keeping sharp corners
+sharp. A sharp shadow is a filled path. A blurred shadow is rasterized like a
+blurred text shadow, at up to three pixels per CSS px and fewer for wide blurs
+(down to one per CSS px, keeping each step of the blurred edge under 7% of
+its alpha), from a separate 64M-pixel document budget. Each box fragment
+casts its own shadow; at a page or line break the shadow is cut at the
+broken edge. Page-margin boxes have no box shadows.
+
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices
 of the same line, so earlier decorations cannot cover later overlapping

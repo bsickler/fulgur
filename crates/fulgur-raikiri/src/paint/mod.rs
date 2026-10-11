@@ -7,6 +7,7 @@
 //! scaled by [`PX_TO_PT`] once and everything below draws in px.
 
 mod border;
+mod box_shadow;
 mod clip;
 mod decoration;
 mod gradient;
@@ -686,7 +687,7 @@ fn paint_shadow_layer(
     }
 }
 
-/// Background and borders of one box fragment (`rect` is its border box,
+/// Shadows, background and borders of one box fragment (`rect` is its border box,
 /// `content` the whole element's content box from layout, if known).
 ///
 /// The fragment is drawn as its own box, apart from its broken edges: the
@@ -708,8 +709,11 @@ fn paint_box(
         return Ok(());
     }
     let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    box_shadow::paint_outer(surface, &border_box, slice, style, &mut raster.box_shadows);
     let padding = padding(style, rect, content);
     paint_background(surface, raster, &border_box, padding, slice, style, text)?;
+    let padding_box = border_box.inset(slice.edges(border::widths(style)));
+    box_shadow::paint_inset(surface, &padding_box, slice, style, &mut raster.box_shadows);
     border::paint_borders(surface, &border_box, style, slice);
     Ok(())
 }

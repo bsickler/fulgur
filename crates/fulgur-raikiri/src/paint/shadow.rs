@@ -6,6 +6,8 @@
 //! so a blurred shadow is rasterized: the glyph outlines are filled into a
 //! coverage mask, blurred, and drawn as an image whose alpha is the blurred
 //! coverage, as browsers do when they print blurred shadows to PDF.
+//!
+//! Box shadows (`box_shadow`) draw their blurred shapes with the same raster.
 
 use super::fill;
 use super::text_clip::{PathSink, Pen, append_run};
@@ -16,7 +18,7 @@ use raikiri_html::computed::CssColor;
 use raikiri_html::{PositionedGlyphRun, TextShadow};
 
 /// Raster pixels per CSS px of a blurred shadow (288 dpi on paper).
-const RASTER_SCALE: f32 = 3.0;
+pub(super) const RASTER_SCALE: f32 = 3.0;
 
 /// Upper bound on the pixels of one blurred shadow's raster. A larger
 /// shadow is rasterized at a lower scale.
@@ -100,10 +102,15 @@ fn paint_blurred(
         offset: shadow.offset,
         blur_radius: shadow.blur_radius,
         color: shadow.color,
+        scale: RASTER_SCALE,
     };
-    let Some(image) = blurred_raster(path, params, budget) else {
-        return;
-    };
+    if let Some(image) = blurred_raster(path, tiny_skia::FillRule::Winding, params, budget) {
+        draw(surface, image);
+    }
+}
+
+/// Draw a shadow raster at the rectangle it covers.
+pub(super) fn draw(surface: &mut Surface<'_>, image: ShadowRaster) {
     let Some(size) = Size::from_wh(image.width, image.height) else {
         return;
     };
@@ -115,17 +122,19 @@ fn paint_blurred(
     surface.pop();
 }
 
-/// The values of a [`TextShadow`] a raster is made from.
+/// The values of a shadow a raster is made from.
 #[derive(Clone, Copy)]
-struct ShadowParams {
-    offset: (f32, f32),
-    blur_radius: f32,
-    color: CssColor,
+pub(super) struct ShadowParams {
+    pub offset: (f32, f32),
+    pub blur_radius: f32,
+    pub color: CssColor,
+    /// The highest raster pixels per CSS px to use.
+    pub scale: f32,
 }
 
 /// A blurred shadow rasterized for drawing: RGBA pixels and the rectangle
 /// they cover, in CSS px.
-struct ShadowRaster {
+pub(super) struct ShadowRaster {
     rgba: Vec<u8>,
     pixel_width: u32,
     pixel_height: u32,
@@ -135,15 +144,17 @@ struct ShadowRaster {
     height: f32,
 }
 
-/// Rasterize the outlines in `path` with the blurred `shadow`, or `None`
-/// when it has no ink or does not fit the remaining budget.
+/// Rasterize the outlines in `path`, filled with `rule`, with the blurred
+/// `shadow`, or `None` when it has no ink or does not fit the remaining
+/// budget.
 ///
 /// The blur is a Gaussian with a standard deviation of half the blur radius
 /// (CSS Backgrounds 3 §7.1), approximated by three box blurs. The raster
 /// extends three standard deviations past the outlines, where the Gaussian
 /// has fallen below one percent.
-fn blurred_raster(
+pub(super) fn blurred_raster(
     path: &tiny_skia::Path,
+    rule: tiny_skia::FillRule,
     shadow: ShadowParams,
     budget: &mut Budget,
 ) -> Option<ShadowRaster> {
@@ -158,7 +169,7 @@ fn blurred_raster(
         return None;
     }
     let pixels = MAX_RASTER_PIXELS.min(budget.pixels);
-    let scale = RASTER_SCALE.min(fitting_scale(width, height, pixels));
+    let scale = shadow.scale.min(fitting_scale(width, height, pixels));
     if scale.is_nan() || scale < MIN_RASTER_SCALE {
         return None;
     }
@@ -182,7 +193,7 @@ fn blurred_raster(
         shadow.offset.0 * scale - x,
         shadow.offset.1 * scale - y,
     );
-    mask.fill_path(path, tiny_skia::FillRule::Winding, true, transform);
+    mask.fill_path(path, rule, true, transform);
     let mut coverage: Vec<f32> = mask.data().iter().map(|&value| f32::from(value)).collect();
     gaussian_blur(
         &mut coverage,
@@ -309,8 +320,8 @@ fn box_blur(input: &[f32], output: &mut [f32], stride: usize, radius: usize) {
     }
 }
 
-/// Collects glyph outlines into a tiny-skia path for rasterizing.
-struct SkiaPath(tiny_skia::PathBuilder);
+/// Collects outlines into a tiny-skia path for rasterizing.
+pub(super) struct SkiaPath(pub(super) tiny_skia::PathBuilder);
 
 impl PathSink for SkiaPath {
     fn move_to(&mut self, x: f32, y: f32) {

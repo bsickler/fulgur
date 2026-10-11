@@ -63,6 +63,8 @@ pub(super) struct RasterCache<'a> {
     source: Option<&'a dyn ImagePixelSource>,
     base: Url,
     images: HashMap<Url, (Arc<DecodedImage>, Image)>,
+    /// Raster pixels left for the document's blurred box shadows.
+    pub(super) box_shadows: super::shadow::Budget,
 }
 
 impl<'a> RasterCache<'a> {
@@ -71,6 +73,7 @@ impl<'a> RasterCache<'a> {
             source,
             base,
             images: HashMap::new(),
+            box_shadows: super::shadow::Budget::default(),
         }
     }
 
