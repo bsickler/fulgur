@@ -99,16 +99,21 @@ omitted. Empty or missing drawable boxes use the first rendered descendant.
 defaults to `open` as in CSS GCPM 3, unlike the Blitz backend, whose outline
 always starts collapsed. Labels may also use `counter()`, `counters()` and
 `string()`: counters take their value at the heading, and `string()` takes the
-latest `string-set` assignment at or before it in document order. Page counters
-and general display:contents box suppression are not implemented in this
-backend. Aborted layout or callback errors return no PDF.
+latest `string-set` assignment at or before it in document order. A heading
+with `display: contents` has no box of its own and links to its first rendered
+descendant. Page counters are not implemented in this backend. Aborted layout
+or callback errors return no PDF.
 
 Raikiri pages use paint order with one text event per paragraph line from the
 page's positioned runs. Source text, generated content and ellipses share their
 ancestor opacity groups, which composite overlapping descendants once. Rounded
 and axis-aware clips retain the existing geometry. Duplicate, unknown or missing
 line events and unknown run sources use legacy rendering for the entire page.
-Inline element opacity and other replaced content remain unsupported. Generated
+A non-atomic inline element with opacity below one is its own group: its inline
+boxes, text, atomic inlines and nested groups composite together after the rest
+of its paragraph, and Raikiri tells which group draws each run. An element with
+`display: contents` has no box, so it paints no background or border and its
+opacity forms no group. Other replaced content remains unsupported. Generated
 text and ellipses have no decoration segments in this API version.
 
 Multi-column rules use Raikiri's physical rectangles, used widths, styles,
@@ -168,6 +173,22 @@ blurs) and drawn as an image with a soft mask; the shadow rasters of a document
 share a budget of 64M pixels. Shadows are not applied to text decorations,
 page-margin box text has no shadows, and glyphs without outlines (bitmap, SVG
 and color-only emoji glyphs) cast no shadow.
+
+Box shadows come from the computed `box-shadow` list, with `currentcolor`
+resolved against the element's color, and are painted last declared first so
+the first one is on top. Outer shadows paint below the background and show
+only outside the border box; `inset` shadows paint between the background and
+the border, inside the padding box. The spread distance grows or shrinks the
+corner radii as CSS Backgrounds 3 §7.1.1 describes, keeping sharp corners
+sharp. A sharp shadow is a filled path. A blurred shadow is rasterized like a
+blurred text shadow, at up to three pixels per CSS px and fewer for wide blurs
+(down to one per CSS px, keeping each step of the blurred edge under 7% of
+its alpha), from a separate 64M-pixel document budget. Each box fragment
+casts its own shadow; at a page or line break the shadow is cut at the
+broken edge. In the collapsing border model, which a cell or row takes from
+its table, internal table boxes cast no outer shadow and the table and its
+boxes have square corners (CSS Backgrounds 3). Page-margin boxes have no box
+shadows.
 
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices

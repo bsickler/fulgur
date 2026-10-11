@@ -201,6 +201,76 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
     assert!(!content.contains("1 0 0 rg"), "{content}");
 }
 
+/// The decoded content of each transparency group Form XObject.
+fn group_forms(pdf: &lopdf::Document) -> Vec<String> {
+    pdf.objects
+        .values()
+        .filter_map(|object| object.as_stream().ok())
+        .filter(|stream| {
+            stream.dict.has(b"Group")
+                && stream
+                    .dict
+                    .get(b"Subtype")
+                    .is_ok_and(|t| t.as_name().is_ok_and(|n| n == b"Form"))
+        })
+        .map(|stream| {
+            String::from_utf8_lossy(
+                &stream
+                    .decompressed_content()
+                    .unwrap_or_else(|_| stream.content.clone()),
+            )
+            .into_owned()
+        })
+        .collect()
+}
+
+/// Whether some graphics state sets the fill opacity to `alpha`.
+fn has_fill_opacity(pdf: &lopdf::Document, alpha: f32) -> bool {
+    pdf.objects
+        .values()
+        .filter_map(|object| object.as_dict().ok())
+        .any(|dict| dict.get(b"ca").ok().and_then(|value| value.as_float().ok()) == Some(alpha))
+}
+
+#[test]
+fn inline_element_opacity_composites_its_text_and_box_as_a_group() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<p>kept <span style=\"opacity: 0.5; background: rgb(0, 0, 255)\">faded</span> kept</p>"
+    ));
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    // The page itself shows only the paragraph's own text; the span's
+    // text is in the group.
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(
+        text.split_whitespace().collect::<Vec<_>>(),
+        ["kept", "kept"]
+    );
+    assert!(has_fill_opacity(&pdf, 0.5));
+    // The span's background and glyphs are drawn inside one group.
+    let forms = group_forms(&pdf);
+    assert!(
+        forms
+            .iter()
+            .any(|form| form.contains("0 0 1 rg") && form.contains("TJ")),
+        "{forms:?}"
+    );
+}
+
+#[test]
+fn display_contents_opacity_has_no_box_to_apply_to() {
+    let (_dir, path) = input(&format!(
+        "{CSS}<div style=\"display: contents; opacity: 0.5\"><p>block</p></div>\
+         <p>a<span style=\"display: contents; opacity: 0.5\">b</span>c</p>"
+    ));
+    let bytes = render(&path, &Config::default()).expect("PDF bytes");
+    let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+    let text = pdf.extract_text(&[1]).expect("extractable text");
+    assert_eq!(text.split_whitespace().collect::<String>(), "blockabc");
+    assert!(!has_fill_opacity(&pdf, 0.5));
+    assert!(group_forms(&pdf).is_empty());
+}
+
 #[test]
 fn margin_boxes_draw_the_running_element_of_each_page() {
     let (_dir, path) = input(
@@ -465,6 +535,20 @@ fn border_images_replace_the_border_styles() {
     ));
     assert!(!blue_fill(&imaged));
     assert!(has_shading(&pdf, 2));
+}
+
+#[test]
+fn collapsed_table_cells_keep_their_border_styles() {
+    let cell = |collapse: &str| {
+        let (pdf, _) = operations(&format!(
+            "{CSS}<table style=\"border-collapse: {collapse}\"><tr>\
+             <td style=\"border: 10px solid rgb(0, 0, 255); \
+             border-image: linear-gradient(red, green) 30% round\">a</td></tr></table>"
+        ));
+        has_shading(&pdf, 2)
+    };
+    assert!(!cell("collapse"));
+    assert!(cell("separate"));
 }
 
 #[test]
@@ -1632,6 +1716,8 @@ mod decoration_tests;
 mod stream_tests;
 mod text_shadow_tests;
 
+mod box_shadow_tests;
+
 #[test]
 fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
     let (pdf, operations) = operations(
@@ -1673,4 +1759,73 @@ fn margin_boxes_draw_their_backgrounds_borders_and_text_on_each_page() {
         "{:?}",
         clip_bounds(&operations)
     );
+}
+
+/// The `cm` operands of `operations` that come before a fill in `color`,
+/// within the same graphics state.
+fn fill_transforms(operations: &[lopdf::content::Operation], color: [f32; 3]) -> Vec<[f32; 6]> {
+    let mut found = Vec::new();
+    let mut current: Option<[f32; 6]> = None;
+    for operation in operations {
+        let values: Vec<f32> = operation
+            .operands
+            .iter()
+            .filter_map(|value| value.as_float().ok())
+            .collect();
+        match operation.operator.as_str() {
+            "cm" => current = values.try_into().ok(),
+            "Q" => current = None,
+            "rg" if values == color => found.extend(current),
+            _ => {}
+        }
+    }
+    found
+}
+
+fn close(actual: [f32; 6], expected: [f32; 6]) -> bool {
+    actual
+        .iter()
+        .zip(expected)
+        .all(|(actual, expected)| (actual - expected).abs() < 1e-3)
+}
+
+#[test]
+fn translated_boxes_move_their_background_with_their_text() {
+    let (pdf, operations) = operations(&format!(
+        "{CSS}<div style=\"height: 40px; background-color: blue; transform: translate(10px, 4px)\">\
+         <p>moved</p></div>"
+    ));
+    // The page's px space (scaled by 0.75 with y flipped) moved by
+    // (10px, 4px), for the background and the text alike.
+    let moved = [0.75, 0.0, 0.0, -0.75, 7.5, 147.0];
+    let backgrounds = fill_transforms(&operations, [0.0, 0.0, 1.0]);
+    assert!(
+        backgrounds.iter().any(|&cm| close(cm, moved)),
+        "{backgrounds:?}"
+    );
+    let texts = fill_transforms(&operations, [0.0, 0.0, 0.0]);
+    assert!(texts.iter().any(|&cm| close(cm, moved)), "{texts:?}");
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("moved"), "{text}");
+}
+
+#[test]
+fn rotated_boxes_draw_their_background_and_text_turned() {
+    let (pdf, operations) = operations(&format!(
+        "{CSS}<div style=\"height: 40px; background-color: blue; transform: rotate(30deg)\">\
+         <p>turned</p></div>"
+    ));
+    let (sin, cos) = 30f32.to_radians().sin_cos();
+    let turned = |cm: [f32; 6]| {
+        (cm[0] - 0.75 * cos).abs() < 1e-3
+            && (cm[1] + 0.75 * sin).abs() < 1e-3
+            && (cm[2] + 0.75 * sin).abs() < 1e-3
+            && (cm[3] + 0.75 * cos).abs() < 1e-3
+    };
+    let backgrounds = fill_transforms(&operations, [0.0, 0.0, 1.0]);
+    assert!(backgrounds.iter().copied().any(turned), "{backgrounds:?}");
+    let texts = fill_transforms(&operations, [0.0, 0.0, 0.0]);
+    assert!(texts.iter().copied().any(turned), "{texts:?}");
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("turned"), "{text}");
 }

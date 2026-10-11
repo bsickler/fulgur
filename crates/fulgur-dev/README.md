@@ -88,9 +88,10 @@ and hierarchy only after layout completes. Author CSS overrides the heading
 defaults; supported labels are literal strings, `attr(...)`, and
 `content(text)`. Invalid levels, empty labels, and non-rendered headings are
 omitted. Empty or missing drawable boxes use the first rendered descendant.
-Krilla 0.7's default outline state collapses child levels. CSS bookmark-state,
-counter/string labels, and general display:contents box suppression are not
-implemented in this backend. Aborted layout or callback errors return no PDF.
+Krilla 0.7's default outline state collapses child levels. A heading with
+`display: contents` has no box and links to its first rendered descendant. CSS
+bookmark-state and counter/string labels are not implemented in this backend.
+Aborted layout or callback errors return no PDF.
 
 Raikiri follows `Page::paint_order_for_text_runs()` when its events cover all
 page text lines, including generated text, anonymous text and ellipses. Each

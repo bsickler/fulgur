@@ -8,6 +8,7 @@
 
 mod border;
 mod border_image;
+mod box_shadow;
 mod clip;
 mod decoration;
 mod gradient;
@@ -19,6 +20,7 @@ mod shadow;
 mod shape;
 mod svg;
 mod text_clip;
+mod transform;
 
 use crate::tagging::{Tags, Target};
 use clip::{ClipMap, ClipStack};
@@ -34,12 +36,12 @@ use krilla::surface::Surface;
 use krilla::tagging::ArtifactType;
 use navigation::PageLink;
 use raikiri_html::computed::{
-    ComputedBackgroundImage, ComputedLengthPercentage, ComputedValues, ComputedVisibility,
-    ComputedVisualBox, CssColor,
+    ComputedBackgroundImage, ComputedDisplay, ComputedLengthPercentage, ComputedValues,
+    ComputedVisibility, ComputedVisualBox, CssColor,
 };
 use raikiri_html::{
     AnchorIndex, DocumentLayout, FontId, FragmentKind, MarginBox, NodeId, NodeKind, Page,
-    PaintEvent, PaintRect, PositionedGlyphRun, RunSource, TextShadow,
+    PaintEvent, PaintRect, PaintTransform, PositionedGlyphRun, RunSource, TextShadow,
 };
 use shape::{Edges, RoundedRect, Slice};
 use std::collections::HashMap;
@@ -316,7 +318,7 @@ fn paint_body(
 ) -> Result<()> {
     let runs = page.text_runs();
     let events = page.paint_order_for_text_runs(&runs);
-    if order::supported(&events, &runs) {
+    if order::supported(&events, &runs, |run| page.text_run_opacity_group(run)) {
         paint_ordered(surface, page, &events, &runs, fonts, svg, raster, tags)
     } else {
         paint_legacy(surface, page, &runs, fonts, svg, raster, tags)
@@ -348,7 +350,7 @@ fn paint_legacy(
             // A box's own overflow clips its content, not its decorations.
             let chain = clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
             active.apply(surface, &clips, &chain);
-            let text = || text_clip::outlines(dom, fragment.node(), runs);
+            let text = || text_clip::outlines(dom, fragment.node(), runs, PaintTransform::IDENTITY);
             tags.mark(
                 surface,
                 page,
@@ -361,6 +363,7 @@ fn paint_legacy(
                         fragment.content_rect(),
                         Slice::of(&fragment),
                         style,
+                        Collapse::of(page, fragment.node(), style),
                         text,
                     )
                 },
@@ -375,7 +378,18 @@ fn paint_legacy(
     }
     // Text goes above every block background and border.
     let text: Vec<_> = runs.iter().collect();
-    paint_text_batch(surface, page, &clips, &mut active, &text, fonts, tags);
+    // This painter draws boxes where layout put them, and text where the
+    // built-in painter draws it.
+    paint_text_batch(
+        surface,
+        page,
+        &clips,
+        &mut active,
+        &text,
+        PaintTransform::IDENTITY,
+        fonts,
+        tags,
+    );
     active.clear(surface);
     Ok(())
 }
@@ -398,26 +412,54 @@ fn paint_ordered(
     let mut active = ClipStack::default();
     let dom = page.dom();
     let mut by_node: HashMap<_, Vec<_>> = HashMap::new();
+    // A line's runs are split by the inline opacity group drawing them.
     let mut by_line: HashMap<_, Vec<_>> = HashMap::new();
     for run in runs {
-        by_line.entry(run.line).or_default().push(run);
+        by_line
+            .entry((run.line, page.text_run_opacity_group(run)))
+            .or_default()
+            .push(run);
         if let RunSource::Text(node) = run.source {
             by_node.entry(node).or_default().push(run);
         }
     }
     let mut batch = Vec::new();
     let mut event_clips = Vec::new();
+    // The enclosing transforms composed, outermost first; the last one is
+    // the space the current events are drawn in.
+    let mut spaces = vec![PaintTransform::IDENTITY];
     for event in events {
+        let space = *spaces.last().unwrap_or(&PaintTransform::IDENTITY);
         if let PaintEvent::Text(fragment) = event {
             batch.extend(by_node.get(&fragment.node()).into_iter().flatten().copied());
             continue;
         }
         if let PaintEvent::TextLine(line) = event {
-            batch.extend(by_line.get(line).into_iter().flatten().copied());
+            batch.extend(by_line.get(&(*line, None)).into_iter().flatten().copied());
             continue;
         }
-        // Clip, opacity, box and stacking steps delimit a text paint batch.
-        paint_text_batch(surface, page, &clips, &mut active, &batch, fonts, tags);
+        if let PaintEvent::GroupTextLine(line, owner) = event {
+            batch.extend(
+                by_line
+                    .get(&(*line, Some(*owner)))
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+            continue;
+        }
+        // Clip, opacity, transform, box and stacking steps delimit a text
+        // paint batch.
+        paint_text_batch(
+            surface,
+            page,
+            &clips,
+            &mut active,
+            &batch,
+            space,
+            fonts,
+            tags,
+        );
         batch.clear();
         match event {
             PaintEvent::Box(fragment) => {
@@ -425,7 +467,7 @@ fn paint_ordered(
                     let chain =
                         clips.chain(page, dom.parent(fragment.node()), fragment.paint_rect());
                     active.apply(surface, &clips, &chain);
-                    let text = || text_clip::outlines(dom, fragment.node(), runs);
+                    let text = || text_clip::outlines(dom, fragment.node(), runs, space);
                     tags.mark(
                         surface,
                         page,
@@ -438,6 +480,7 @@ fn paint_ordered(
                                 fragment.content_rect(),
                                 Slice::of(fragment),
                                 style,
+                                Collapse::of(page, fragment.node(), style),
                                 text,
                             )
                         },
@@ -460,6 +503,7 @@ fn paint_ordered(
                             None,
                             Slice::generated(piece),
                             piece.style,
+                            Collapse::Separate,
                             text,
                         )
                     },
@@ -490,7 +534,12 @@ fn paint_ordered(
             }
             PaintEvent::PushClip(shape, _) => {
                 // The producer owns column placement and clipping geometry.
-                let path = clip::clip_path(*shape, page.geometry().page_box);
+                // An open axis extends over the page, wherever the enclosing
+                // transforms put it.
+                let page_box = page.geometry().page_box;
+                let bounds = transform::inverse(space)
+                    .map_or(page_box, |inverse| transform::bounds(inverse, page_box));
+                let path = clip::clip_path(*shape, bounds);
                 if let Some(path) = &path {
                     active.clear(surface);
                     surface.push_clip_path(path, &FillRule::NonZero);
@@ -515,12 +564,32 @@ fn paint_ordered(
                 active.clear(surface);
                 surface.pop();
             }
+            PaintEvent::PushTransform(own) => {
+                // Transforms share the surface stack with clips and groups.
+                active.clear(surface);
+                surface.push_transform(&transform::to_krilla(*own));
+                spaces.push(space * *own);
+            }
+            PaintEvent::PopTransform => {
+                active.clear(surface);
+                surface.pop();
+                spaces.pop();
+            }
             // Clips are applied lazily before each content draw.
             // Other events have already been rejected by `order::supported`.
             _ => {}
         }
     }
-    paint_text_batch(surface, page, &clips, &mut active, &batch, fonts, tags);
+    paint_text_batch(
+        surface,
+        page,
+        &clips,
+        &mut active,
+        &batch,
+        *spaces.last().unwrap_or(&PaintTransform::IDENTITY),
+        fonts,
+        tags,
+    );
     active.clear(surface);
     Ok(())
 }
@@ -548,12 +617,17 @@ fn paint_replaced(
 
 /// Keep the line's decorations below or above all neighboring glyph ink,
 /// and the line's text shadows below both.
+///
+/// The surface draws in `space`, the enclosing paint transforms; a run
+/// whose own transform differs is moved from that space to its own.
+#[allow(clippy::too_many_arguments)]
 fn paint_text_batch(
     surface: &mut Surface<'_>,
     page: &Page<'_>,
     clips: &ClipMap,
     active: &mut ClipStack,
     runs: &[&PositionedGlyphRun<'_>],
+    space: PaintTransform,
     fonts: &mut FontCache,
     tags: &mut Tags,
 ) {
@@ -582,6 +656,7 @@ fn paint_text_batch(
                 active,
                 &runs,
                 layer,
+                space,
                 &mut fonts.shadows,
                 tags,
             );
@@ -594,20 +669,27 @@ fn paint_text_batch(
             for run in &runs {
                 let chain = run_clip_chain(page, clips, run);
                 active.apply(surface, clips, &chain);
+                let moved = transform::relative(space, run.transform);
                 if let Some(phase) = phase {
                     if !run.decorations.is_empty() {
                         tags.mark(
                             surface,
                             page,
                             Target::Artifact(ArtifactType::Other),
-                            |surface| decoration::paint(surface, &run.decorations, phase),
+                            |surface| {
+                                transform::with(surface, moved, |surface| {
+                                    decoration::paint(surface, &run.decorations, phase)
+                                })
+                            },
                         );
                     }
                 } else if paints_glyphs(run) || (tags.enabled() && has_glyphs(run)) {
                     // Transparent text is still content: tagged output
                     // draws it at zero opacity so that it stays readable.
                     tags.mark(surface, page, Target::Run(run), |surface| {
-                        paint_glyph_run(surface, run, fonts)
+                        transform::with(surface, moved, |surface| {
+                            paint_glyph_run(surface, run, fonts)
+                        })
                     });
                 }
             }
@@ -649,25 +731,40 @@ fn paint_shadow_layer(
     active: &mut ClipStack,
     runs: &[&PositionedGlyphRun<'_>],
     layer: usize,
+    space: PaintTransform,
     budget: &mut shadow::Budget,
     tags: &mut Tags,
 ) {
+    type Key = (TextShadow, Vec<clip::ClipKey>, Option<PaintTransform>);
     let mut group: Vec<&PositionedGlyphRun<'_>> = Vec::new();
-    let mut current: Option<(TextShadow, Vec<clip::ClipKey>)> = None;
+    let mut current: Option<Key> = None;
+    let mut paint = |surface: &mut Surface<'_>,
+                     active: &mut ClipStack,
+                     (shadow, chain, moved): Key,
+                     group: &[&PositionedGlyphRun<'_>]| {
+        active.apply(surface, clips, &chain);
+        tags.mark(
+            surface,
+            page,
+            Target::Artifact(ArtifactType::Other),
+            |surface| {
+                transform::with(surface, moved, |surface| {
+                    shadow::paint(surface, group, &shadow, budget)
+                })
+            },
+        );
+    };
     for &run in runs {
-        let next = run
-            .shadows
-            .get(layer)
-            .map(|shadow| (*shadow, run_clip_chain(page, clips, run)));
+        let next = run.shadows.get(layer).map(|shadow| {
+            (
+                *shadow,
+                run_clip_chain(page, clips, run),
+                transform::relative(space, run.transform),
+            )
+        });
         if next != current {
-            if let Some((shadow, chain)) = current.take() {
-                active.apply(surface, clips, &chain);
-                tags.mark(
-                    surface,
-                    page,
-                    Target::Artifact(ArtifactType::Other),
-                    |surface| shadow::paint(surface, &group, &shadow, budget),
-                );
+            if let Some(key) = current.take() {
+                paint(surface, active, key, &group);
             }
             group.clear();
             current = next;
@@ -676,18 +773,12 @@ fn paint_shadow_layer(
             group.push(run);
         }
     }
-    if let Some((shadow, chain)) = current {
-        active.apply(surface, clips, &chain);
-        tags.mark(
-            surface,
-            page,
-            Target::Artifact(ArtifactType::Other),
-            |surface| shadow::paint(surface, &group, &shadow, budget),
-        );
+    if let Some(key) = current {
+        paint(surface, active, key, &group);
     }
 }
 
-/// Background and borders of one box fragment (`rect` is its border box,
+/// Shadows, background and borders of one box fragment (`rect` is its border box,
 /// `content` the whole element's content box from layout, if known).
 ///
 /// The fragment is drawn as its own box, apart from its broken edges: the
@@ -696,6 +787,7 @@ fn paint_shadow_layer(
 /// not give the size of the unbroken box or the fragment's offset in it.
 /// `text` gives the outlines of the element's text, for
 /// `background-clip: text`.
+#[allow(clippy::too_many_arguments)]
 fn paint_box(
     surface: &mut Surface<'_>,
     raster: &mut raster::RasterCache<'_>,
@@ -703,18 +795,100 @@ fn paint_box(
     content: Option<PaintRect>,
     slice: Slice,
     style: &ComputedValues,
+    collapse: Collapse,
     text: impl FnOnce() -> Option<Path>,
 ) -> Result<()> {
     if !matches!(style.visibility, ComputedVisibility::Visible) {
         return Ok(());
     }
-    let border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    let mut border_box = RoundedRect::border_box(rect, &style.border_radius).sliced(slice);
+    if collapse != Collapse::Separate {
+        // CSS Backgrounds 3 §4 (effect on tables): `border-radius` has no
+        // effect on the table and its internal boxes in the collapsing
+        // border model.
+        border_box.radii = [[0.0; 2]; 4];
+    }
+    if collapse != Collapse::Internal {
+        // §7.1: nor do outer shadows on the internal boxes.
+        box_shadow::paint_outer(surface, &border_box, slice, style, &mut raster.box_shadows);
+    }
     let padding = padding(style, rect, content);
     paint_background(surface, raster, &border_box, padding, slice, style, text)?;
-    if !border_image::paint(surface, raster, rect, slice, style)? {
+    let padding_box = border_box.inset(slice.edges(border::widths(style)));
+    box_shadow::paint_inset(surface, &padding_box, slice, style, &mut raster.box_shadows);
+    // CSS Backgrounds 3 §6: `border-image` does not apply to internal table
+    // boxes in the collapsing border model.
+    if collapse == Collapse::Internal || !border_image::paint(surface, raster, rect, slice, style)?
+    {
         border::paint_borders(surface, &border_box, style, slice);
     }
     Ok(())
+}
+
+/// How a box takes part in a table's border model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Collapse {
+    /// Not a table box, or one of a table with separated borders.
+    Separate,
+    /// A table in the collapsing border model.
+    Table,
+    /// An internal box (row, group, column or cell) of such a table.
+    Internal,
+}
+
+impl Collapse {
+    /// The role of `node`, whose style is `style`. The border model is the
+    /// table's: `border-collapse` applies to table boxes only (CSS Tables 3
+    /// §11.2), so an internal box reads it from its nearest table ancestor.
+    fn of(page: &Page<'_>, node: NodeId, style: &ComputedValues) -> Self {
+        let collapses = |style: &ComputedValues| {
+            // The keyword type is not named in the computed layer:
+            // `separate` is the initial value, so anything else is `collapse`.
+            style.border_collapse != ComputedValues::initial().border_collapse
+        };
+        if is_table(style) {
+            return if collapses(style) {
+                Self::Table
+            } else {
+                Self::Separate
+            };
+        }
+        let internal = matches!(
+            style.display,
+            ComputedDisplay::TableRowGroup
+                | ComputedDisplay::TableHeaderGroup
+                | ComputedDisplay::TableFooterGroup
+                | ComputedDisplay::TableRow
+                | ComputedDisplay::TableColumnGroup
+                | ComputedDisplay::TableColumn
+                | ComputedDisplay::TableCell
+        );
+        if !internal {
+            return Self::Separate;
+        }
+        let dom = page.dom();
+        let mut ancestor = dom.parent(node);
+        while let Some(node) = ancestor {
+            if let Some(style) = page.computed(node)
+                && is_table(style)
+            {
+                return if collapses(style) {
+                    Self::Internal
+                } else {
+                    Self::Separate
+                };
+            }
+            ancestor = dom.parent(node);
+        }
+        Self::Separate
+    }
+}
+
+fn is_table(style: &ComputedValues) -> bool {
+    matches!(
+        style.display,
+        ComputedDisplay::Table | ComputedDisplay::InlineTable
+    )
 }
 
 /// CSS Backgrounds 3 §2: the background color, then the background image

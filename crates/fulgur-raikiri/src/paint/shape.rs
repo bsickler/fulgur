@@ -1,6 +1,7 @@
 //! Box geometry: border-box rectangles with rounded corners, inset to the
 //! padding and content edges, and the PDF paths that outline them.
 
+use super::text_clip::PathSink;
 use krilla::geom::{Path, PathBuilder};
 use raikiri_html::PaintRect;
 use raikiri_html::computed::ComputedBorderRadius;
@@ -215,7 +216,7 @@ impl RoundedRect {
     /// Append one clockwise subpath, starting at the top-left curve's end.
     /// Inner ellipses retain their radii and are cropped at opposite edges
     /// (CSS Backgrounds 3 §4.2). An empty intersection appends nothing.
-    pub(super) fn append_to(&self, builder: &mut PathBuilder) {
+    pub(super) fn append_to<B: PathSink + ?Sized>(&self, builder: &mut B) {
         if self.is_empty() {
             return;
         }

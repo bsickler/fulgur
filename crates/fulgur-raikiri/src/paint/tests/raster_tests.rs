@@ -157,7 +157,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
             .iter()
             .any(|event| matches!(event, PaintEvent::MarkerImage(_)))
     );
-    assert!(order::supported(&events, &runs));
+    assert!(order::supported(&events, &runs, |_| None));
     for with_source in [false, true] {
         let mut pdf = krilla::Document::new();
         let mut pdf_page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
