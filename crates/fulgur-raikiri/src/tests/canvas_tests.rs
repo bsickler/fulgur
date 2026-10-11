@@ -67,3 +67,43 @@ fn canvas_background_is_an_artifact_in_tagged_pdf() {
     let bytes = render(&path, &config).expect("a PDF/UA document");
     assert!(bytes.starts_with(b"%PDF"));
 }
+
+#[test]
+fn a_display_none_owner_leaves_the_canvas_transparent() {
+    // CSS Backgrounds 3 §2.11: an element that generates no box gives no
+    // background to the canvas, and the body does not take over from the
+    // root.
+    for (html, canvas) in [
+        (
+            "<html style=\"display: none; background: rgb(0, 0, 255)\">\
+             <body style=\"margin: 0\"><p>one</p></body></html>",
+            [0, 0, 255],
+        ),
+        (
+            "<body style=\"display: none; background: rgb(0, 128, 0)\"><p>one</p></body>",
+            [0, 128, 0],
+        ),
+    ] {
+        let (_dir, path) = input(&format!("{PAGES}{html}"));
+        let bytes = render(&path, &Config::default()).expect("PDF bytes");
+        let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+        for page in pdf.get_pages().keys() {
+            let fills = fills(&page_operations(&pdf, *page));
+            assert!(!fills.contains(&canvas), "{html}: {fills:?}");
+        }
+    }
+}
+
+#[test]
+fn background_clip_does_not_shrink_the_canvas() {
+    for clip in ["text", "border-area", "content-box"] {
+        let (_dir, path) = input(&format!(
+            "{PAGES}<body style=\"margin: 0; padding: 10px; border: 5px solid rgb(255, 0, 0); \
+             background: rgb(0, 128, 0); background-clip: {clip}\"><p>one</p></body>"
+        ));
+        let bytes = render(&path, &Config::default()).expect("PDF bytes");
+        let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
+        let fills = fills(&page_operations(&pdf, 1));
+        assert_eq!(fills.first(), Some(&[0, 128, 0]), "{clip}: {fills:?}");
+    }
+}

@@ -6,6 +6,8 @@
 //! transparent (`background-color: transparent` and no image), the first
 //! `<body>` child propagates its background to the canvas instead. The
 //! element that gave its background to the canvas does not paint it again.
+//! An element with `display: none` generates no box, so it leaves the canvas
+//! transparent.
 
 use super::paint_background;
 use super::raster::RasterCache;
@@ -13,7 +15,7 @@ use super::shape::{Edges, RoundedRect, Slice};
 use fulgur_core::Result;
 use krilla::surface::Surface;
 use raikiri_html::computed::{
-    ComputedBackgroundImage, ComputedValues, ComputedVisualBox, CssColor,
+    ComputedBackgroundImage, ComputedDisplay, ComputedValues, ComputedVisualBox, CssColor,
 };
 use raikiri_html::{NodeId, NodeKind, Page};
 
@@ -26,13 +28,19 @@ pub(super) fn owner(page: &Page<'_>) -> Option<NodeId> {
     let html = dom
         .children(dom.root())
         .find(|&node| element(node, "html"))?;
-    if page.computed(html).is_some_and(has_background) {
-        return Some(html);
+    if let Some(style) = page.computed(html)
+        && has_background(style)
+    {
+        return generates_box(style).then_some(html);
     }
     let body = dom.children(html).find(|&node| element(node, "body"))?;
     page.computed(body)
-        .is_some_and(has_background)
+        .is_some_and(|style| has_background(style) && generates_box(style))
         .then_some(body)
+}
+
+fn generates_box(style: &ComputedValues) -> bool {
+    style.display != ComputedDisplay::None
 }
 
 fn has_background(style: &ComputedValues) -> bool {
@@ -72,8 +80,14 @@ pub(super) fn paint(
         right: true,
     };
     let mut style = style.clone();
-    // `background-clip: text` has no glyphs to clip to on the canvas.
-    if style.background_clip == ComputedVisualBox::Text {
+    // `background-clip` has no effect on the canvas, which covers the whole
+    // page area (CSS Backgrounds 3 §2.11.1). The page area has no border or
+    // padding, so the other boxes already coincide with it; `text` and
+    // `border-area` would otherwise paint glyphs or an empty ring.
+    if matches!(
+        style.background_clip,
+        ComputedVisualBox::Text | ComputedVisualBox::BorderArea
+    ) {
         style.background_clip = ComputedVisualBox::BorderBox;
     }
     paint_background(
