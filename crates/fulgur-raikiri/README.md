@@ -180,7 +180,8 @@ blurred text shadow, at up to three pixels per CSS px and fewer for wide blurs
 (down to one per CSS px, keeping each step of the blurred edge under 7% of
 its alpha), from a separate 64M-pixel document budget. Each box fragment
 casts its own shadow; at a page or line break the shadow is cut at the
-broken edge. Page-margin boxes have no box shadows.
+broken edge. Internal table boxes in the collapsing border model cast no outer
+shadow (CSS Backgrounds 3 §7.1). Page-margin boxes have no box shadows.
 
 Decoration phases apply to each paragraph line independently. Raikiri's
 line identities keep coincident lines distinct and join font/color slices

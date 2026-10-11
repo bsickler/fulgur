@@ -169,3 +169,30 @@ fn page_breaks_cut_the_shadow_at_the_broken_edge() {
     assert!(clips[1][1].abs() < 0.01, "{:?}", clips[1]);
     assert!(clips[1][3] > 109.0, "{:?}", clips[1]);
 }
+
+#[test]
+fn an_empty_box_casts_its_spread_shadow() {
+    let (_, ops) = operations(&format!(
+        "{BOX_CSS}<div style='width:0;height:0;box-shadow:0 0 0 10px rgb(255,0,0), inset 0 0 0 4px blue'></div>"
+    ));
+    assert_eq!(paints(&ops), ["255,0,0"]);
+    let [x0, y0, x1, y1] = even_odd_clip_bounds(&ops)[0];
+    assert!(
+        x0 < 20.0 && y0 < 20.0 && x1 > 40.0 && y1 > 40.0,
+        "{x0} {y0} {x1} {y1}"
+    );
+}
+
+#[test]
+fn collapsed_table_cells_have_no_outer_shadow() {
+    let table = |collapse: &str| {
+        let (_, ops) = operations(&format!(
+            "{BOX_CSS}<table style='border-collapse:{collapse}'><tr>\
+             <td style='box-shadow:3px 3px rgb(255,0,0), inset 2px 2px rgb(0,0,255)'>a</td>\
+             </tr></table>"
+        ));
+        paints(&ops)
+    };
+    assert_eq!(table("collapse"), ["0,0,255"]);
+    assert_eq!(table("separate"), ["255,0,0", "0,0,255"]);
+}
