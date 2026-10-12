@@ -92,6 +92,139 @@ impl SvgRender {
         });
     }
 }
+/// SVG image references found in a document, as usvg would see them.
+pub(crate) struct ImageRefScan {
+    /// Byte ranges of whole `href` attributes whose value usvg would hand to
+    /// its string resolver (that is, read from the filesystem by default),
+    /// sorted and deduplicated.
+    pub unsafe_attrs: Vec<std::ops::Range<usize>>,
+    /// `id` values of SVG elements, which `feImage` fragment links can target.
+    pub svg_ids: std::collections::HashSet<String>,
+}
+
+/// Find the image references in `text` that usvg would resolve through its
+/// string resolver. `None` when usvg could not parse `text` as XML at all.
+///
+/// The document is parsed with the same `roxmltree` version and options as
+/// `usvg::Tree::from_str`, so what this sees is what usvg sees, including
+/// entity expansion. Element names are matched in any namespace, which is
+/// stricter than usvg.
+pub(crate) fn scan_image_refs(text: &str) -> Option<ImageRefScan> {
+    use usvg::roxmltree;
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let doc = roxmltree::Document::parse_with_options(text, options).ok()?;
+    let svg_ids = doc
+        .descendants()
+        .filter(|node| node.tag_name().namespace() == Some(SVG_NS))
+        .filter_map(|node| node.attribute("id"))
+        .map(str::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+    let mut unsafe_attrs = Vec::new();
+    for node in doc.descendants().filter(|node| node.is_element()) {
+        let element = node.tag_name().name();
+        if !matches!(element, "image" | "feImage") {
+            continue;
+        }
+        for attr in node.attributes() {
+            if attr.name() == "href"
+                && !is_self_contained_image_href(element, attr.value(), |id| svg_ids.contains(id))
+            {
+                unsafe_attrs.push(attr.range());
+            }
+        }
+    }
+    unsafe_attrs.sort_by_key(|range| (range.start, range.end));
+    unsafe_attrs.dedup();
+    Some(ImageRefScan {
+        unsafe_attrs,
+        svg_ids,
+    })
+}
+
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// Whether usvg resolves the `href` of an `image` / `feImage` element
+/// without its string resolver, which reads the filesystem by default.
+///
+/// usvg decodes a value as a `data:` URL first (it needs the scheme and a
+/// comma) and treats an `feImage` `#id` as a link when an SVG element with
+/// that id exists. Anything else, including an unmatched fragment, falls
+/// through to the string resolver.
+pub(crate) fn is_self_contained_image_href(
+    element: &str,
+    value: &str,
+    has_svg_id: impl Fn(&str) -> bool,
+) -> bool {
+    let is_data_url = value
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        && value.contains(',');
+    is_data_url || (element == "feImage" && value.strip_prefix('#').is_some_and(has_svg_id))
+}
+
+/// Outcome of [`sanitize_svg_payload`].
+pub(crate) enum SvgPayload {
+    /// Not an SVG usvg can parse, or an SVG with no unsafe references:
+    /// forward the original bytes.
+    Unchanged,
+    /// The SVG source with its unsafe `href` attributes removed.
+    Sanitized(Vec<u8>),
+    /// Removing the attributes did not make the document safe (for example
+    /// the references come from entity expansion); drop the payload.
+    Rejected,
+}
+
+/// Remove `href` attributes that usvg would read from the filesystem from an
+/// SVG payload that a later, unrestricted usvg parse will see.
+///
+/// Works on the source text rather than re-serializing a parsed tree, so
+/// text, fonts and everything else in the document reach the real parser
+/// untouched. The result is re-scanned and rejected unless it is clean.
+pub(crate) fn sanitize_svg_payload(bytes: &[u8]) -> SvgPayload {
+    let decompressed;
+    let data = if bytes.starts_with(&[0x1f, 0x8b]) {
+        match usvg::decompress_svgz(bytes) {
+            Ok(data) => {
+                decompressed = data;
+                &decompressed[..]
+            }
+            // usvg fails on the same input, so it never resolves anything.
+            Err(_) => return SvgPayload::Unchanged,
+        }
+    } else {
+        bytes
+    };
+    let Ok(text) = std::str::from_utf8(data) else {
+        return SvgPayload::Unchanged;
+    };
+    let Some(scan) = scan_image_refs(text) else {
+        return SvgPayload::Unchanged;
+    };
+    if scan.unsafe_attrs.is_empty() {
+        return SvgPayload::Unchanged;
+    }
+    let mut sanitized = text.to_owned();
+    let mut previous_start = usize::MAX;
+    for range in scan.unsafe_attrs.iter().rev() {
+        // Ranges from entity expansion can overlap; skip rather than cut
+        // twice and let the re-scan decide.
+        if range.end > previous_start {
+            continue;
+        }
+        sanitized.replace_range(range.clone(), "");
+        previous_start = range.start;
+    }
+    match scan_image_refs(&sanitized) {
+        Some(rescan) if rescan.unsafe_attrs.is_empty() => {
+            SvgPayload::Sanitized(sanitized.into_bytes())
+        }
+        _ => SvgPayload::Rejected,
+    }
+}
+
 /// Number of raster or nested-SVG `<image>` nodes in a parsed tree.
 #[cfg(test)]
 pub(crate) fn count_images(group: &usvg::Group) -> usize {
@@ -297,5 +430,110 @@ mod tests {
         );
         let tree = Tree::from_str(&svg, &sandboxed_options()).unwrap();
         assert_eq!(count_images(tree.root()), 1);
+    }
+
+    #[test]
+    fn self_contained_image_href_policy() {
+        let none = |_: &str| false;
+        let shape = |id: &str| id == "shape";
+        assert!(is_self_contained_image_href(
+            "image",
+            "data:image/png;base64,AAAA",
+            none
+        ));
+        assert!(is_self_contained_image_href(
+            "image",
+            "DATA:image/png,x",
+            none
+        ));
+        // usvg needs a comma to decode a data URL; without one the value
+        // goes to the string resolver as a path.
+        assert!(!is_self_contained_image_href(
+            "image",
+            "data:secret.png",
+            none
+        ));
+        assert!(!is_self_contained_image_href(
+            "image",
+            " data:image/png,x",
+            none
+        ));
+        assert!(!is_self_contained_image_href(
+            "image",
+            "/etc/secret.png",
+            none
+        ));
+        assert!(!is_self_contained_image_href(
+            "image",
+            "file:///etc/secret.png",
+            none
+        ));
+        assert!(!is_self_contained_image_href("image", "#shape", shape));
+        assert!(is_self_contained_image_href("feImage", "#shape", shape));
+        assert!(!is_self_contained_image_href(
+            "feImage",
+            "#missing.png",
+            shape
+        ));
+        assert!(!is_self_contained_image_href("image", "", none));
+    }
+
+    #[test]
+    fn sanitize_svg_payload_cuts_file_refs_and_keeps_text() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="20"><image xlink:href="/etc/secret.png" width="10" height="10"/><text>label</text></svg>"#;
+        let SvgPayload::Sanitized(bytes) = sanitize_svg_payload(svg.as_bytes()) else {
+            panic!("expected a sanitized payload");
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("<text>label</text>"), "{text}");
+        assert!(scan_image_refs(&text).unwrap().unsafe_attrs.is_empty());
+    }
+
+    #[test]
+    fn sanitize_svg_payload_handles_svgz_and_leading_comments() {
+        use std::io::Write;
+        let svg = r#"<!-- logo --><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="secret.png" width="10" height="10"/></svg>"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(svg.as_bytes()).unwrap();
+        let svgz = encoder.finish().unwrap();
+        for payload in [svg.as_bytes(), &svgz[..]] {
+            let SvgPayload::Sanitized(bytes) = sanitize_svg_payload(payload) else {
+                panic!("expected a sanitized payload");
+            };
+            assert!(!String::from_utf8(bytes).unwrap().contains("secret"));
+        }
+    }
+
+    #[test]
+    fn sanitize_svg_payload_rejects_refs_from_entities() {
+        let svg = r#"<!DOCTYPE svg [<!ENTITY img "<image href='/etc/secret.png' width='10' height='10'/>">]><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">&img;&img;</svg>"#;
+        assert!(!matches!(
+            sanitize_svg_payload(svg.as_bytes()),
+            SvgPayload::Unchanged
+        ));
+        if let SvgPayload::Sanitized(bytes) = sanitize_svg_payload(svg.as_bytes()) {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(scan_image_refs(&text).is_none_or(|scan| scan.unsafe_attrs.is_empty()));
+        }
+    }
+
+    #[test]
+    fn sanitize_svg_payload_leaves_clean_and_non_svg_bytes_alone() {
+        let clean = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{TEST_PNG_DATA_URL}" width="10" height="10"/></svg>"#
+        );
+        assert!(matches!(
+            sanitize_svg_payload(clean.as_bytes()),
+            SvgPayload::Unchanged
+        ));
+        assert!(matches!(
+            sanitize_svg_payload(b"body { color: red }"),
+            SvgPayload::Unchanged
+        ));
+        assert!(matches!(
+            sanitize_svg_payload(TEST_PNG_1X1),
+            SvgPayload::Unchanged
+        ));
     }
 }

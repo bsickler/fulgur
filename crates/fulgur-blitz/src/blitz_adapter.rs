@@ -480,63 +480,116 @@ pub fn apply_single_pass<P: DomPass + ?Sized>(
 
 /// Resolve styles (Stylo) and compute layout (Taffy).
 pub fn resolve(doc: &mut HtmlDocument) {
-    strip_external_svg_image_refs(doc);
+    sanitize_inline_svgs(doc);
     doc.resolve(0.0);
 }
 
-/// Remove `href` / `xlink:href` attributes on SVG `<image>` and `<feImage>`
-/// elements that would make usvg read a local file.
+/// Keep Blitz's inline `<svg>` parse from reading local files.
 ///
-/// Blitz parses inline `<svg>` subtrees during layout construction with
-/// usvg's default options, whose image resolver reads any non-`data:` href
-/// from the filesystem (relative to the current working directory). That
-/// bypasses the `AssetBundle` and the base directory confinement, and even
-/// reads files when no base directory is configured. Blitz offers no hook to
-/// replace those options, so the references are removed from the DOM before
-/// construction runs. `data:` URLs carry their bytes inline and stay; so do
-/// `feImage` fragment references (`#id`), which point at an element in the
-/// same SVG rather than a file.
+/// During layout construction Blitz serializes each `<svg>` subtree with
+/// `outer_html()` and parses it with usvg's default options, whose image
+/// resolver reads any `href` it cannot decode as a `data:` URL from the
+/// filesystem, relative to the current working directory. That bypasses the
+/// `AssetBundle` and the base directory confinement, and reads files even
+/// when no base directory is configured. Blitz offers no hook to replace
+/// those options, so this checks the exact source Blitz will produce and
+/// cleans the DOM until that source is safe:
+///
+/// 1. Remove the offending `href` attributes on `image` / `feImage`.
+/// 2. Escape `<` and `&` in text nodes. `outer_html()` writes text verbatim,
+///    so text such as `&lt;image href=...&gt;` would otherwise reappear as
+///    markup in the serialized SVG.
+/// 3. If the source is still unsafe, drop the subtree's children.
 ///
 /// Runs on every [`resolve`] call so subtrees inserted by DOM passes are
-/// covered too; the walk is a no-op once the document is clean.
-fn strip_external_svg_image_refs(doc: &mut HtmlDocument) {
-    let mut to_clear: Vec<(usize, blitz_dom::QualName)> = Vec::new();
-    for (node_id, node) in doc.tree().iter() {
-        let Some(elem) = node.element_data() else {
-            continue;
-        };
-        if elem.name.ns != blitz_dom::ns!(svg) {
-            continue;
-        }
-        let allows_fragment = match elem.name.local.as_ref() {
-            "image" => false,
-            "feImage" => true,
-            _ => continue,
-        };
-        for attr in elem.attrs() {
-            if attr.name.local.as_ref() == "href"
-                && !is_inline_svg_href(&attr.value, allows_fragment)
-            {
-                to_clear.push((node_id, attr.name.clone()));
-            }
-        }
-    }
-    if to_clear.is_empty() {
-        return;
-    }
-    let mut mutator = doc.mutate();
-    for (node_id, name) in to_clear {
-        mutator.clear_attribute(node_id, name);
+/// covered too. Each step only runs when the source is unsafe, so a clean
+/// document is left untouched and repeated calls never re-escape text.
+fn sanitize_inline_svgs(doc: &mut HtmlDocument) {
+    let svg_ids: Vec<usize> = doc
+        .tree()
+        .iter()
+        .filter(|(_, node)| {
+            node.element_data()
+                .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+        })
+        .map(|(node_id, _)| node_id)
+        .collect();
+    for svg_id in svg_ids {
+        sanitize_inline_svg(doc, svg_id);
     }
 }
 
-/// Whether an SVG image `href` resolves without touching the filesystem.
-fn is_inline_svg_href(value: &str, allows_fragment: bool) -> bool {
-    let value = value.trim_start();
-    let is_data = value
-        .get(..5)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"));
-    is_data || (allows_fragment && value.starts_with('#'))
+fn sanitize_inline_svg(doc: &mut HtmlDocument, svg_id: usize) {
+    let Some(scan) = crate::svg::scan_image_refs(&inline_svg_source(doc, svg_id)) else {
+        return;
+    };
+    if scan.unsafe_attrs.is_empty() {
+        return;
+    }
+
+    let mut subtree = Vec::new();
+    let mut stack = vec![svg_id];
+    while let Some(node_id) = stack.pop() {
+        let Some(node) = doc.get_node(node_id) else {
+            continue;
+        };
+        subtree.push(node_id);
+        stack.extend(node.children.iter().rev());
+    }
+
+    let mut attrs_to_clear = Vec::new();
+    let mut texts_to_escape = Vec::new();
+    for &node_id in &subtree {
+        let node = doc.get_node(node_id).expect("collected above");
+        if let Some(elem) = node.element_data() {
+            let element = elem.name.local.as_ref();
+            if matches!(element, "image" | "feImage") {
+                for attr in elem.attrs() {
+                    if attr.name.local.as_ref() == "href"
+                        && !crate::svg::is_self_contained_image_href(element, &attr.value, |id| {
+                            scan.svg_ids.contains(id)
+                        })
+                    {
+                        attrs_to_clear.push((node_id, attr.name.clone()));
+                    }
+                }
+            }
+        } else if let Some(text) = node.text_data() {
+            if text.content.contains(['<', '&']) {
+                let escaped = text.content.replace('&', "&amp;").replace('<', "&lt;");
+                texts_to_escape.push((node_id, escaped));
+            }
+        }
+    }
+    {
+        let mut mutator = doc.mutate();
+        for (node_id, name) in attrs_to_clear {
+            mutator.clear_attribute(node_id, name);
+        }
+        for (node_id, escaped) in texts_to_escape {
+            mutator.set_node_text(node_id, &escaped);
+        }
+    }
+
+    let still_unsafe = crate::svg::scan_image_refs(&inline_svg_source(doc, svg_id))
+        .is_some_and(|scan| !scan.unsafe_attrs.is_empty());
+    if still_unsafe {
+        log::warn!("dropping inline <svg> content that references local files");
+        doc.mutate().remove_and_drop_all_children(svg_id);
+    }
+}
+
+/// The source Blitz hands to usvg for an inline `<svg>` element, mirroring
+/// `blitz-dom` 0.2.4 `layout/construct.rs` (including its `xmlns` fix-up).
+fn inline_svg_source(doc: &HtmlDocument, svg_id: usize) -> String {
+    let mut source = doc
+        .get_node(svg_id)
+        .map(|node| node.outer_html())
+        .unwrap_or_default();
+    if !source.contains("xmlns") {
+        source = source.replace("<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"");
+    }
+    source
 }
 
 /// Update the document's viewport size (in CSS px) and mark Stylo's stylist
@@ -4549,15 +4602,54 @@ mod tests {
     }
 
     #[test]
-    fn inline_svg_href_policy() {
-        assert!(is_inline_svg_href("data:image/png;base64,AAAA", false));
-        assert!(is_inline_svg_href("  DATA:image/png,x", false));
-        assert!(!is_inline_svg_href("/etc/secret.png", false));
-        assert!(!is_inline_svg_href("img/logo.png", false));
-        assert!(!is_inline_svg_href("file:///etc/secret.png", false));
-        assert!(!is_inline_svg_href("#shape", false));
-        assert!(is_inline_svg_href("#shape", true));
-        assert!(!is_inline_svg_href("", false));
+    fn resolve_strips_inline_svg_markup_injected_through_text() {
+        // `outer_html()` writes text nodes verbatim, so escaped markup in the
+        // HTML would come back as a real `<image>` in the SVG source.
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("secret.png");
+        std::fs::write(&png, crate::svg::TEST_PNG_1X1).unwrap();
+        let html = format!(
+            r#"<html><body><svg width="20" height="10"><g>&lt;image href="{file}" width="10" height="10"/&gt;</g><![CDATA[<image href="{file}" width="10" height="10"/>]]></svg></body></html>"#,
+            file = png.display(),
+        );
+        let mut doc = parse(&html, 400.0, &[]);
+        resolve(&mut doc);
+        // A second resolve must not double-escape the text.
+        resolve(&mut doc);
+
+        let svg_id = doc
+            .tree()
+            .iter()
+            .find(|(_, node)| {
+                node.element_data()
+                    .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+            })
+            .map(|(node_id, _)| node_id)
+            .expect("inline svg element");
+        let source = inline_svg_source(&doc, svg_id);
+        let scan = crate::svg::scan_image_refs(&source).expect("source parses");
+        assert!(scan.unsafe_attrs.is_empty(), "{source}");
+        // The injected markup survives as escaped text, escaped only once.
+        assert!(source.contains("&lt;image"), "{source}");
+        assert!(!source.contains("&amp;lt;"), "{source}");
+        let tree = extract_inline_svg_tree(doc.get_node(svg_id).unwrap().element_data().unwrap())
+            .expect("blitz parsed the inline svg");
+        assert_eq!(crate::svg::count_images(tree.root()), 0);
+    }
+
+    #[test]
+    fn resolve_keeps_feimage_fragments_only_when_the_target_exists() {
+        let html = r##"<html><body><svg width="10" height="10"><defs><filter id="f"><feImage href="#shape"/><feImage href="#missing.png"/></filter></defs><rect id="shape" width="10" height="10"/></svg></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        let hrefs: Vec<Option<String>> = doc
+            .tree()
+            .iter()
+            .filter_map(|(_, node)| node.element_data())
+            .filter(|elem| elem.name.local.as_ref() == "feImage")
+            .map(|elem| get_attr(elem, "href").map(str::to_owned))
+            .collect();
+        assert_eq!(hrefs, vec![Some("#shape".to_owned()), None]);
     }
 
     #[test]

@@ -192,14 +192,6 @@ impl FulgurNetProvider {
     }
 }
 
-/// Parse `bytes` as SVG without resolving external image references and
-/// serialize the result back, so a later parse with any options cannot reach
-/// the filesystem. `None` when the bytes are not a valid SVG.
-fn sanitize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
-    let tree = usvg::Tree::from_data(bytes, &crate::svg::sandboxed_options()).ok()?;
-    Some(tree.to_string(&usvg::WriteOptions::default()).into_bytes())
-}
-
 impl NetProvider<Resource> for FulgurNetProvider {
     fn fetch(&self, doc_id: usize, request: Request, handler: BoxedHandler<Resource>) {
         let Some(canonical_path) = self.resolve_local_path(&request) else {
@@ -244,24 +236,21 @@ impl NetProvider<Resource> for FulgurNetProvider {
                 // stylo parser accepts the bytes, so keep the raw text
                 // around as a fallback the callback can use to backfill
                 // `column_css_texts` when this upfront guess was wrong.
-                if matches!(
-                    crate::image::AssetKind::detect(&raw_bytes),
-                    crate::image::AssetKind::Svg
-                ) {
-                    // Blitz parses SVG payloads with usvg's default image
-                    // resolver, which reads `<image href>` paths straight
-                    // from the filesystem relative to the working directory
-                    // — outside the base directory. Hand it a re-serialized
-                    // tree parsed with external references dropped instead.
-                    let Some(sanitized) = sanitize_svg(&raw_bytes) else {
-                        return;
-                    };
-                    (Bytes::from(sanitized), None, None, None)
-                } else {
-                    let fallback = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
-                    (Bytes::from(raw_bytes), None, None, fallback)
-                }
+                let fallback = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
+                (Bytes::from(raw_bytes), None, None, fallback)
             };
+
+        // Blitz parses any payload it cannot decode as a raster image with
+        // usvg's default options, whose image resolver reads `<image href>`
+        // paths from the filesystem relative to the working directory, outside
+        // the base directory. Remove those references from every payload usvg
+        // could parse, whatever its extension or the branch above: the same
+        // file can be both a `<link>` target and an `<img src>`.
+        let bytes_for_blitz = match crate::svg::sanitize_svg_payload(&bytes_for_blitz) {
+            crate::svg::SvgPayload::Unchanged => bytes_for_blitz,
+            crate::svg::SvgPayload::Sanitized(sanitized) => Bytes::from(sanitized),
+            crate::svg::SvgPayload::Rejected => return,
+        };
 
         let is_top_level_import_root = {
             let mut inner = self.inner.lock().unwrap();
