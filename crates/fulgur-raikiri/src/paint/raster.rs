@@ -1,6 +1,7 @@
 //! Cached raster pixels inside the existing page paint stack.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use fulgur_core::{Error, Result};
@@ -59,10 +60,70 @@ pub(super) struct BackgroundLayer<'s> {
     pub repeat: &'s ComputedBackgroundRepeat,
 }
 
+/// Converted images kept per URL, one per raster size drawn, so that an
+/// image drawn at two sizes in turn is not converted again each time.
+const SIZES_PER_URL: usize = 4;
+
+/// A map from URL strings that hashes a string by its length and ends
+/// only. A `data:` URL can be megabytes long and is looked up on every
+/// draw; a lookup still compares the whole string, but neither hashes nor
+/// copies it.
+struct UrlMap<V> {
+    buckets: HashMap<u64, Vec<(Box<str>, V)>>,
+}
+
+impl<V> Default for UrlMap<V> {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+        }
+    }
+}
+
+impl<V> UrlMap<V> {
+    fn hash(key: &str) -> u64 {
+        const SAMPLE: usize = 256;
+        let bytes = key.as_bytes();
+        let mut state = DefaultHasher::new();
+        bytes.len().hash(&mut state);
+        if bytes.len() <= 2 * SAMPLE {
+            bytes.hash(&mut state);
+        } else {
+            bytes[..SAMPLE].hash(&mut state);
+            bytes[bytes.len() - SAMPLE..].hash(&mut state);
+        }
+        state.finish()
+    }
+
+    fn get(&self, key: &str) -> Option<&V> {
+        self.buckets
+            .get(&Self::hash(key))?
+            .iter()
+            .find(|(stored, _)| **stored == *key)
+            .map(|(_, value)| value)
+    }
+
+    fn get_or_insert_with(&mut self, key: &str, value: impl FnOnce() -> V) -> &mut V {
+        let bucket = self.buckets.entry(Self::hash(key)).or_default();
+        let index = match bucket.iter().position(|(stored, _)| **stored == *key) {
+            Some(index) => index,
+            None => {
+                bucket.push((key.into(), value()));
+                bucket.len() - 1
+            }
+        };
+        &mut bucket[index].1
+    }
+}
+
 pub(super) struct RasterCache<'a> {
     source: Option<&'a dyn ImagePixelSource>,
     base: Url,
-    images: HashMap<Url, (Arc<DecodedImage>, Image)>,
+    /// Converted images by URL, oldest first, keyed by the source pixels
+    /// they were converted from.
+    images: UrlMap<Vec<(Arc<DecodedImage>, Image)>>,
+    /// Resolved `url()` values, so a `data:` URL is parsed once.
+    urls: UrlMap<Option<Url>>,
     /// Raster pixels left for the document's blurred box shadows.
     pub(super) box_shadows: super::shadow::Budget,
 }
@@ -72,15 +133,20 @@ impl<'a> RasterCache<'a> {
         Self {
             source,
             base,
-            images: HashMap::new(),
+            images: UrlMap::default(),
+            urls: UrlMap::default(),
             box_shadows: super::shadow::Budget::default(),
         }
     }
 
     fn image(&mut self, url: &Url, pixels: &Arc<DecodedImage>) -> Result<Image> {
-        if let Some((cached, image)) = self.images.get(url)
-            && Arc::ptr_eq(cached, pixels)
-        {
+        // The pixel source returns the same pixels for the same size, so
+        // the pixels identify the converted image.
+        if let Some((_, image)) = self.images.get(url.as_str()).and_then(|images| {
+            images
+                .iter()
+                .find(|(cached, _)| Arc::ptr_eq(cached, pixels))
+        }) {
             return Ok(image.clone());
         }
         // Page validates the RGBA dimensions. Split once for PDF channels;
@@ -110,8 +176,13 @@ impl<'a> RasterCache<'a> {
             true,
         )
         .map_err(Error::PdfGeneration)?;
-        self.images
-            .insert(url.clone(), (Arc::clone(pixels), image.clone()));
+        let images = self.images.get_or_insert_with(url.as_str(), Vec::new);
+        // Pixels of the same size that the source no longer returns are stale.
+        images.retain(|(cached, _)| (cached.width, cached.height) != (pixels.width, pixels.height));
+        if images.len() == SIZES_PER_URL {
+            images.remove(0);
+        }
+        images.push((Arc::clone(pixels), image.clone()));
         Ok(image)
     }
 
@@ -198,7 +269,7 @@ impl<'a> RasterCache<'a> {
         let Some(source) = self.source else {
             return Ok(());
         };
-        let Some(url) = self.resolve(layer.url) else {
+        let Some(url) = self.resolve_cached(layer.url) else {
             return Ok(());
         };
         let Some(intrinsic) = source.intrinsic_size(&url) else {
@@ -256,8 +327,8 @@ impl<'a> RasterCache<'a> {
 
     /// The resolved URL and natural size of a `url()` image, or `None` when
     /// it cannot be fetched or decoded.
-    pub(super) fn natural_size(&self, raw: &str) -> Option<(Url, ImageIntrinsicSize)> {
-        let url = self.resolve(raw)?;
+    pub(super) fn natural_size(&mut self, raw: &str) -> Option<(Url, ImageIntrinsicSize)> {
+        let url = self.resolve_cached(raw)?;
         let natural = self.source?.intrinsic_size(&url)?;
         Some((url, natural))
     }
@@ -283,6 +354,16 @@ impl<'a> RasterCache<'a> {
             return Ok(None);
         }
         self.image(url, &pixels).map(Some)
+    }
+
+    /// [`Self::resolve`], remembered per `url()` value.
+    fn resolve_cached(&mut self, raw: &str) -> Option<Url> {
+        if let Some(url) = self.urls.get(raw) {
+            return url.clone();
+        }
+        let url = self.resolve(raw);
+        self.urls.get_or_insert_with(raw, || url.clone());
+        url
     }
 
     /// The absolute image URL of a computed `url()` value, without its
@@ -330,5 +411,56 @@ mod tests {
             cache.resolve("img/a.svg#x").map(|url| url.to_string()),
             Some("file:///img/a.svg".to_string())
         );
+    }
+
+    struct Sizes(Vec<std::sync::Arc<raikiri_traits::DecodedImage>>);
+
+    impl raikiri_traits::ImagePixelSource for Sizes {
+        fn get_decoded(
+            &self,
+            _url: &url::Url,
+        ) -> Option<std::sync::Arc<raikiri_traits::DecodedImage>> {
+            None
+        }
+
+        fn get_decoded_at_size(
+            &self,
+            _url: &url::Url,
+            size: raikiri_traits::ImageRasterSize,
+            _max_output_bytes: Option<u64>,
+        ) -> Option<std::sync::Arc<raikiri_traits::DecodedImage>> {
+            self.0
+                .iter()
+                .find(|image| image.width as f32 == size.width)
+                .cloned()
+        }
+    }
+
+    #[test]
+    fn images_drawn_at_two_sizes_in_turn_are_converted_once_per_size() {
+        let image = |side: u32| {
+            std::sync::Arc::new(raikiri_traits::DecodedImage {
+                width: side,
+                height: side,
+                rgba: vec![255; (side * side * 4) as usize],
+            })
+        };
+        let source = Sizes(vec![image(16), image(24)]);
+        let mut cache = RasterCache::for_tests(Some(&source));
+        let url = url::Url::parse("data:image/svg+xml,<svg/>").unwrap();
+        for side in [16.0, 24.0, 16.0, 24.0] {
+            assert!(cache.sized_image(&url, side, side).unwrap().is_some());
+        }
+        assert_eq!(cache.images.get(url.as_str()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn url_values_resolve_once() {
+        let mut cache = RasterCache::for_tests(None);
+        let long = format!("data:image/png;base64,{}", "A".repeat(4096));
+        for raw in [long.as_str(), "a.png", long.as_str(), "#x"] {
+            assert_eq!(cache.resolve_cached(raw), cache.resolve(raw));
+        }
+        assert_eq!(cache.urls.buckets.values().map(Vec::len).sum::<usize>(), 3);
     }
 }
