@@ -516,15 +516,12 @@ fn sanitize_inline_svgs(doc: &mut HtmlDocument) {
         .iter()
         .filter(|(_, node)| is_svg(node))
         .filter(|(_, node)| {
-            let mut parent = node.parent;
-            while let Some(parent_id) = parent {
-                let Some(ancestor) = doc.get_node(parent_id) else {
-                    break;
-                };
-                if is_svg(ancestor) {
+            let mut ancestor = node.parent.and_then(|id| doc.get_node(id));
+            while let Some(node) = ancestor {
+                if is_svg(node) {
                     return false;
                 }
-                parent = ancestor.parent;
+                ancestor = node.parent.and_then(|id| doc.get_node(id));
             }
             true
         })
@@ -546,11 +543,10 @@ fn sanitize_inline_svg(doc: &mut HtmlDocument, svg_id: usize) {
     let mut subtree = Vec::new();
     let mut stack = vec![svg_id];
     while let Some(node_id) = stack.pop() {
-        let Some(node) = doc.get_node(node_id) else {
-            continue;
-        };
-        subtree.push(node_id);
-        stack.extend(node.children.iter().rev());
+        if let Some(node) = doc.get_node(node_id) {
+            subtree.push(node_id);
+            stack.extend(node.children.iter().rev());
+        }
     }
 
     let mut attrs_to_clear = Vec::new();
@@ -585,6 +581,12 @@ fn sanitize_inline_svg(doc: &mut HtmlDocument, svg_id: usize) {
         }
     }
 
+    drop_inline_svg_content_if_unsafe(doc, svg_id);
+}
+
+/// Last resort for [`sanitize_inline_svg`]: drop the children of `svg_id`
+/// when its serialized source still references local files.
+fn drop_inline_svg_content_if_unsafe(doc: &mut HtmlDocument, svg_id: usize) {
     let still_unsafe = crate::svg::scan_image_refs(&inline_svg_source(doc, svg_id))
         .is_some_and(|scan| !scan.unsafe_attrs.is_empty());
     if still_unsafe {
@@ -4649,6 +4651,42 @@ mod tests {
         let tree = extract_inline_svg_tree(doc.get_node(svg_id).unwrap().element_data().unwrap())
             .expect("blitz parsed the inline svg");
         assert_eq!(crate::svg::count_images(tree.root()), 0);
+    }
+
+    #[test]
+    fn unsafe_inline_svg_content_is_dropped_as_a_last_resort() {
+        let mut doc = parse(
+            r#"<html><body><svg><image href="/etc/secret.png"/></svg></body></html>"#,
+            400.0,
+            &[],
+        );
+        let svg_id = doc
+            .tree()
+            .iter()
+            .find(|(_, node)| {
+                node.element_data()
+                    .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+            })
+            .map(|(node_id, _)| node_id)
+            .expect("inline svg element");
+        drop_inline_svg_content_if_unsafe(&mut doc, svg_id);
+        assert!(doc.get_node(svg_id).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn resolve_leaves_unparseable_inline_svg_alone() {
+        // usvg cannot parse this source either (a bare `&`), so it never
+        // resolves the href and the DOM is left as written.
+        let html = r#"<html><body><svg><text>a & b</text><image href="/etc/secret.png"/></svg></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        let href = doc
+            .tree()
+            .iter()
+            .filter_map(|(_, node)| node.element_data())
+            .find(|elem| elem.name.local.as_ref() == "image")
+            .and_then(|elem| get_attr(elem, "href").map(str::to_owned));
+        assert_eq!(href.as_deref(), Some("/etc/secret.png"));
     }
 
     #[test]

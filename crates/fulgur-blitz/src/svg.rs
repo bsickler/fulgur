@@ -426,10 +426,7 @@ mod tests {
     #[test]
     fn sanitize_svg_payload_cuts_file_refs_and_keeps_text() {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="20"><image xlink:href="/etc/secret.png" width="10" height="10"/><text>label</text></svg>"#;
-        let SvgPayload::Sanitized(bytes) = sanitize_svg_payload(svg.as_bytes()) else {
-            panic!("expected a sanitized payload");
-        };
-        let text = String::from_utf8(bytes).unwrap();
+        let text = sanitized_text(svg.as_bytes());
         assert!(!text.contains("secret"), "{text}");
         assert!(text.contains("<text>label</text>"), "{text}");
         assert!(scan_image_refs(&text).unwrap().unsafe_attrs.is_empty());
@@ -443,24 +440,37 @@ mod tests {
         encoder.write_all(svg.as_bytes()).unwrap();
         let svgz = encoder.finish().unwrap();
         for payload in [svg.as_bytes(), &svgz[..]] {
-            let SvgPayload::Sanitized(bytes) = sanitize_svg_payload(payload) else {
-                panic!("expected a sanitized payload");
-            };
-            assert!(!String::from_utf8(bytes).unwrap().contains("secret"));
+            assert!(!sanitized_text(payload).contains("secret"));
         }
     }
 
+    /// The text of a payload `sanitize_svg_payload` must sanitize.
+    fn sanitized_text(payload: &[u8]) -> String {
+        let sanitized = match sanitize_svg_payload(payload) {
+            SvgPayload::Sanitized(bytes) => Some(bytes),
+            _ => None,
+        };
+        String::from_utf8(sanitized.expect("a sanitized payload")).unwrap()
+    }
+
     #[test]
-    fn sanitize_svg_payload_rejects_refs_from_entities() {
+    fn sanitize_svg_payload_cuts_refs_from_entities() {
+        // roxmltree reports the attribute range inside the entity
+        // declaration, so the cut lands there and covers every use.
         let svg = r#"<!DOCTYPE svg [<!ENTITY img "<image href='/etc/secret.png' width='10' height='10'/>">]><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">&img;&img;</svg>"#;
-        assert!(!matches!(
-            sanitize_svg_payload(svg.as_bytes()),
+        let text = sanitized_text(svg.as_bytes());
+        assert!(!text.contains("secret"), "{text}");
+        assert!(scan_image_refs(&text).unwrap().unsafe_attrs.is_empty());
+    }
+
+    #[test]
+    fn sanitize_svg_payload_leaves_undecodable_svgz_alone() {
+        // usvg fails on the same bytes, so it never resolves anything.
+        let payload = [0x1f, 0x8b, 0x00, 0x01, 0x02];
+        assert!(matches!(
+            sanitize_svg_payload(&payload),
             SvgPayload::Unchanged
         ));
-        if let SvgPayload::Sanitized(bytes) = sanitize_svg_payload(svg.as_bytes()) {
-            let text = String::from_utf8(bytes).unwrap();
-            assert!(scan_image_refs(&text).is_none_or(|scan| scan.unsafe_attrs.is_empty()));
-        }
     }
 
     #[test]
