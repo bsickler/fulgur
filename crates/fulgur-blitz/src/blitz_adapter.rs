@@ -480,7 +480,63 @@ pub fn apply_single_pass<P: DomPass + ?Sized>(
 
 /// Resolve styles (Stylo) and compute layout (Taffy).
 pub fn resolve(doc: &mut HtmlDocument) {
+    strip_external_svg_image_refs(doc);
     doc.resolve(0.0);
+}
+
+/// Remove `href` / `xlink:href` attributes on SVG `<image>` and `<feImage>`
+/// elements that would make usvg read a local file.
+///
+/// Blitz parses inline `<svg>` subtrees during layout construction with
+/// usvg's default options, whose image resolver reads any non-`data:` href
+/// from the filesystem (relative to the current working directory). That
+/// bypasses the `AssetBundle` and the base directory confinement, and even
+/// reads files when no base directory is configured. Blitz offers no hook to
+/// replace those options, so the references are removed from the DOM before
+/// construction runs. `data:` URLs carry their bytes inline and stay; so do
+/// `feImage` fragment references (`#id`), which point at an element in the
+/// same SVG rather than a file.
+///
+/// Runs on every [`resolve`] call so subtrees inserted by DOM passes are
+/// covered too; the walk is a no-op once the document is clean.
+fn strip_external_svg_image_refs(doc: &mut HtmlDocument) {
+    let mut to_clear: Vec<(usize, blitz_dom::QualName)> = Vec::new();
+    for (node_id, node) in doc.tree().iter() {
+        let Some(elem) = node.element_data() else {
+            continue;
+        };
+        if elem.name.ns != blitz_dom::ns!(svg) {
+            continue;
+        }
+        let allows_fragment = match elem.name.local.as_ref() {
+            "image" => false,
+            "feImage" => true,
+            _ => continue,
+        };
+        for attr in elem.attrs() {
+            if attr.name.local.as_ref() == "href"
+                && !is_inline_svg_href(&attr.value, allows_fragment)
+            {
+                to_clear.push((node_id, attr.name.clone()));
+            }
+        }
+    }
+    if to_clear.is_empty() {
+        return;
+    }
+    let mut mutator = doc.mutate();
+    for (node_id, name) in to_clear {
+        mutator.clear_attribute(node_id, name);
+    }
+}
+
+/// Whether an SVG image `href` resolves without touching the filesystem.
+fn is_inline_svg_href(value: &str, allows_fragment: bool) -> bool {
+    let value = value.trim_start();
+    let is_data = value
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"));
+    is_data || (allows_fragment && value.starts_with('#'))
 }
 
 /// Update the document's viewport size (in CSS px) and mark Stylo's stylist
@@ -4460,6 +4516,49 @@ mod tests {
     use super::*;
     use crate::gcpm::TargetTextKind;
     use crate::units::F32Units;
+
+    #[test]
+    fn resolve_strips_inline_svg_file_image_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("secret.png");
+        std::fs::write(&png, crate::svg::TEST_PNG_1X1).unwrap();
+        let html = format!(
+            r#"<html><body><svg width="20" height="10">
+                <image href="{file}" width="10" height="10"/>
+                <image xlink:href="{file}" width="10" height="10"/>
+                <image href="{data}" x="10" width="10" height="10"/>
+            </svg></body></html>"#,
+            file = png.display(),
+            data = crate::svg::TEST_PNG_DATA_URL,
+        );
+        let mut doc = parse(&html, 400.0, &[]);
+        resolve(&mut doc);
+
+        let svg = doc
+            .tree()
+            .iter()
+            .find_map(|(_, node)| {
+                node.element_data()
+                    .filter(|elem| elem.name.local.as_ref() == "svg")
+            })
+            .expect("inline svg element");
+        let tree = extract_inline_svg_tree(svg).expect("blitz parsed the inline svg");
+        // Only the data URL survives; the two file references are dropped
+        // before Blitz hands the subtree to usvg.
+        assert_eq!(crate::svg::count_images(tree.root()), 1);
+    }
+
+    #[test]
+    fn inline_svg_href_policy() {
+        assert!(is_inline_svg_href("data:image/png;base64,AAAA", false));
+        assert!(is_inline_svg_href("  DATA:image/png,x", false));
+        assert!(!is_inline_svg_href("/etc/secret.png", false));
+        assert!(!is_inline_svg_href("img/logo.png", false));
+        assert!(!is_inline_svg_href("file:///etc/secret.png", false));
+        assert!(!is_inline_svg_href("#shape", false));
+        assert!(is_inline_svg_href("#shape", true));
+        assert!(!is_inline_svg_href("", false));
+    }
 
     #[test]
     fn build_static_content_css_serializes_selectors_and_escapes() {

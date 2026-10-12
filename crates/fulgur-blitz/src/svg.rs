@@ -7,6 +7,26 @@ use usvg::Tree;
 
 use crate::draw_primitives::Canvas;
 
+/// `usvg` options for parsing SVG that came from the document or the asset
+/// bundle.
+///
+/// usvg's default image resolver treats every non-`data:` `href` as a local
+/// file path and reads it with `std::fs::read`, relative to the current
+/// working directory when `resources_dir` is unset. That would let an SVG
+/// pull arbitrary local images into the PDF, bypassing both the
+/// `AssetBundle` and the base directory confinement. This keeps `data:` URLs
+/// (they are self-contained, and usvg forbids images inside nested SVG) and
+/// drops every other reference.
+pub(crate) fn sandboxed_options() -> usvg::Options<'static> {
+    usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    }
+}
+
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
 pub struct SvgRender {
@@ -72,6 +92,34 @@ impl SvgRender {
         });
     }
 }
+/// Number of raster or nested-SVG `<image>` nodes in a parsed tree.
+#[cfg(test)]
+pub(crate) fn count_images(group: &usvg::Group) -> usize {
+    group
+        .children()
+        .iter()
+        .map(|node| match node {
+            usvg::Node::Image(_) => 1,
+            usvg::Node::Group(group) => count_images(group),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// A 1x1 PNG for tests that need a real image file or data URL.
+#[cfg(test)]
+pub(crate) const TEST_PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+    0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+    0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+/// `TEST_PNG_1X1` as a base64 `data:` URL.
+#[cfg(test)]
+pub(crate) const TEST_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +270,32 @@ mod tests {
             .with_node_id(Some(1))
             .with_node_id(Some(2));
         assert_eq!(svg.node_id, Some(2));
+    }
+
+    #[test]
+    fn sandboxed_options_do_not_read_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("secret.png");
+        std::fs::write(&png, TEST_PNG_1X1).unwrap();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{}" width="10" height="10"/></svg>"#,
+            png.display()
+        );
+
+        // Control: usvg's default resolver does read the file.
+        let unrestricted = Tree::from_str(&svg, &usvg::Options::default()).unwrap();
+        assert_eq!(count_images(unrestricted.root()), 1);
+
+        let tree = Tree::from_str(&svg, &sandboxed_options()).unwrap();
+        assert_eq!(count_images(tree.root()), 0);
+    }
+
+    #[test]
+    fn sandboxed_options_keep_data_urls() {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{TEST_PNG_DATA_URL}" width="10" height="10"/></svg>"#
+        );
+        let tree = Tree::from_str(&svg, &sandboxed_options()).unwrap();
+        assert_eq!(count_images(tree.root()), 1);
     }
 }

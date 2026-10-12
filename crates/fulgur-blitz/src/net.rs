@@ -192,6 +192,14 @@ impl FulgurNetProvider {
     }
 }
 
+/// Parse `bytes` as SVG without resolving external image references and
+/// serialize the result back, so a later parse with any options cannot reach
+/// the filesystem. `None` when the bytes are not a valid SVG.
+fn sanitize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let tree = usvg::Tree::from_data(bytes, &crate::svg::sandboxed_options()).ok()?;
+    Some(tree.to_string(&usvg::WriteOptions::default()).into_bytes())
+}
+
 impl NetProvider<Resource> for FulgurNetProvider {
     fn fetch(&self, doc_id: usize, request: Request, handler: BoxedHandler<Resource>) {
         let Some(canonical_path) = self.resolve_local_path(&request) else {
@@ -236,8 +244,23 @@ impl NetProvider<Resource> for FulgurNetProvider {
                 // stylo parser accepts the bytes, so keep the raw text
                 // around as a fallback the callback can use to backfill
                 // `column_css_texts` when this upfront guess was wrong.
-                let fallback = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
-                (Bytes::from(raw_bytes), None, None, fallback)
+                if matches!(
+                    crate::image::AssetKind::detect(&raw_bytes),
+                    crate::image::AssetKind::Svg
+                ) {
+                    // Blitz parses SVG payloads with usvg's default image
+                    // resolver, which reads `<image href>` paths straight
+                    // from the filesystem relative to the working directory
+                    // — outside the base directory. Hand it a re-serialized
+                    // tree parsed with external references dropped instead.
+                    let Some(sanitized) = sanitize_svg(&raw_bytes) else {
+                        return;
+                    };
+                    (Bytes::from(sanitized), None, None, None)
+                } else {
+                    let fallback = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
+                    (Bytes::from(raw_bytes), None, None, fallback)
+                }
             };
 
         let is_top_level_import_root = {
@@ -509,5 +532,44 @@ mod tests {
             provider.drain_gcpm_by_link_node().is_empty(),
             "a rejected fetch must not register a node-id-tagged GCPM entry either"
         );
+    }
+
+    #[test]
+    fn fetch_strips_svg_image_refs_outside_base_path() {
+        // An SVG served from inside the base directory must not be able to
+        // pull in a file outside it through `<image href>`: Blitz parses
+        // the payload with usvg's file-reading default resolver.
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("base");
+        fs::create_dir(&base).unwrap();
+        let outside = parent.path().join("secret.png");
+        fs::write(&outside, crate::svg::TEST_PNG_1X1).unwrap();
+        let svg_path = base.join("logo.svg");
+        fs::write(
+            &svg_path,
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"><image href="{}" width="10" height="10"/><rect width="10" height="10"/></svg>"#,
+                outside.display()
+            ),
+        )
+        .unwrap();
+
+        let provider = FulgurNetProvider::new(Some(base));
+        let request = Request::get(Url::from_file_path(&svg_path).unwrap());
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, request, handler);
+
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .take()
+            .expect("an SVG inside the base path is still served");
+        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default()).unwrap();
+        assert_eq!(crate::svg::count_images(tree.root()), 0);
+        assert_eq!(tree.size().width(), 10.0);
+        assert_eq!(tree.size().height(), 20.0);
     }
 }
