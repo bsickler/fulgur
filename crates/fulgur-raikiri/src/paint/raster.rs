@@ -1,8 +1,7 @@
 //! Cached raster pixels inside the existing page paint stack.
 
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use fulgur_core::{Error, Result};
 use krilla::geom::Path;
@@ -64,72 +63,24 @@ pub(super) struct BackgroundLayer<'s> {
 /// image drawn at two sizes in turn is not converted again each time.
 const SIZES_PER_URL: usize = 4;
 
-/// A map from URL strings that hashes a string by its length and evenly
-/// spaced samples of it. A `data:` URL can be megabytes long and is looked
-/// up on every draw; a lookup still compares the whole string, but neither
-/// hashes nor copies it. Encoded images of the same length share their
-/// headers and trailers but differ throughout their data, which the
-/// samples reach.
-struct UrlMap<V> {
-    buckets: HashMap<u64, Vec<(Box<str>, V)>>,
-}
-
-impl<V> Default for UrlMap<V> {
-    fn default() -> Self {
-        Self {
-            buckets: HashMap::new(),
-        }
-    }
-}
-
-impl<V> UrlMap<V> {
-    fn hash(key: &str) -> u64 {
-        const SAMPLE: usize = 32;
-        const SAMPLES: usize = 32;
-        let bytes = key.as_bytes();
-        let mut state = DefaultHasher::new();
-        bytes.len().hash(&mut state);
-        if bytes.len() <= SAMPLE * SAMPLES {
-            bytes.hash(&mut state);
-        } else {
-            let last = bytes.len() - SAMPLE;
-            for index in 0..SAMPLES {
-                let start = last * index / (SAMPLES - 1);
-                bytes[start..start + SAMPLE].hash(&mut state);
-            }
-        }
-        state.finish()
-    }
-
-    fn get(&self, key: &str) -> Option<&V> {
-        self.buckets
-            .get(&Self::hash(key))?
-            .iter()
-            .find(|(stored, _)| **stored == *key)
-            .map(|(_, value)| value)
-    }
-
-    fn get_or_insert_with(&mut self, key: &str, value: impl FnOnce() -> V) -> &mut V {
-        let bucket = self.buckets.entry(Self::hash(key)).or_default();
-        let index = match bucket.iter().position(|(stored, _)| **stored == *key) {
-            Some(index) => index,
-            None => {
-                bucket.push((key.into(), value()));
-                bucket.len() - 1
-            }
-        };
-        &mut bucket[index].1
-    }
+/// A converted image and the source pixels it came from. The pixels are
+/// held weakly: the converted image owns its own channels, and a strong
+/// reference would keep the source's RGBA buffer alive after the source
+/// evicts it.
+struct Converted {
+    pixels: Weak<DecodedImage>,
+    width: u32,
+    height: u32,
+    image: Image,
 }
 
 pub(super) struct RasterCache<'a> {
     source: Option<&'a dyn ImagePixelSource>,
     base: Url,
-    /// Converted images by URL, oldest first, keyed by the source pixels
-    /// they were converted from.
-    images: UrlMap<Vec<(Arc<DecodedImage>, Image)>>,
+    /// Converted images by URL, oldest first.
+    images: HashMap<Box<str>, Vec<Converted>>,
     /// Resolved `url()` values, so a `data:` URL is parsed once.
-    urls: UrlMap<Option<Url>>,
+    urls: HashMap<Box<str>, Option<Url>>,
     /// Raster pixels left for the document's blurred box shadows.
     pub(super) box_shadows: super::shadow::Budget,
 }
@@ -139,21 +90,21 @@ impl<'a> RasterCache<'a> {
         Self {
             source,
             base,
-            images: UrlMap::default(),
-            urls: UrlMap::default(),
+            images: HashMap::new(),
+            urls: HashMap::new(),
             box_shadows: super::shadow::Budget::default(),
         }
     }
 
     fn image(&mut self, url: &Url, pixels: &Arc<DecodedImage>) -> Result<Image> {
-        // The pixel source returns the same pixels for the same size, so
-        // the pixels identify the converted image.
-        if let Some((_, image)) = self.images.get(url.as_str()).and_then(|images| {
+        // The pixel source returns the same pixels for the same size while
+        // it keeps them, so the pixels identify the converted image.
+        if let Some(converted) = self.images.get(url.as_str()).and_then(|images| {
             images
                 .iter()
-                .find(|(cached, _)| Arc::ptr_eq(cached, pixels))
+                .find(|converted| std::ptr::eq(converted.pixels.as_ptr(), Arc::as_ptr(pixels)))
         }) {
-            return Ok(image.clone());
+            return Ok(converted.image.clone());
         }
         // Page validates the RGBA dimensions. Split once for PDF channels;
         // repeated placements share the converted image and source pixels.
@@ -182,13 +133,20 @@ impl<'a> RasterCache<'a> {
             true,
         )
         .map_err(Error::PdfGeneration)?;
-        let images = self.images.get_or_insert_with(url.as_str(), Vec::new);
+        let images = self.images.entry(url.as_str().into()).or_default();
         // Pixels of the same size that the source no longer returns are stale.
-        images.retain(|(cached, _)| (cached.width, cached.height) != (pixels.width, pixels.height));
+        images.retain(|converted| {
+            (converted.width, converted.height) != (pixels.width, pixels.height)
+        });
         if images.len() == SIZES_PER_URL {
             images.remove(0);
         }
-        images.push((Arc::clone(pixels), image.clone()));
+        images.push(Converted {
+            pixels: Arc::downgrade(pixels),
+            width: pixels.width,
+            height: pixels.height,
+            image: image.clone(),
+        });
         Ok(image)
     }
 
@@ -368,7 +326,7 @@ impl<'a> RasterCache<'a> {
             return url.clone();
         }
         let url = self.resolve(raw);
-        self.urls.get_or_insert_with(raw, || url.clone());
+        self.urls.insert(raw.into(), url.clone());
         url
     }
 
@@ -470,7 +428,7 @@ mod tests {
             .get(url.as_str())
             .unwrap()
             .iter()
-            .map(|(pixels, _)| pixels.width)
+            .map(|converted| converted.width)
             .collect();
         assert_eq!(widths, [2, 3, 4, 5]);
 
@@ -479,7 +437,12 @@ mod tests {
         cache.image(&url, &fresh).unwrap();
         let cached = cache.images.get(url.as_str()).unwrap();
         assert_eq!(cached.len(), 4);
-        assert!(std::sync::Arc::ptr_eq(&cached[3].0, &fresh));
+        // The cache does not keep the source's pixels alive.
+        assert_eq!(std::sync::Arc::strong_count(&fresh), 1);
+        assert!(std::ptr::eq(
+            cached[3].pixels.as_ptr(),
+            std::sync::Arc::as_ptr(&fresh)
+        ));
     }
 
     #[test]
@@ -489,23 +452,6 @@ mod tests {
         for raw in [long.as_str(), "a.png", long.as_str(), "#x"] {
             assert_eq!(cache.resolve_cached(raw), cache.resolve(raw));
         }
-        assert_eq!(cache.urls.buckets.values().map(Vec::len).sum::<usize>(), 3);
-    }
-
-    #[test]
-    fn long_urls_that_differ_in_the_middle_hash_apart() {
-        // Same length, header and trailer; different data in between.
-        let url = |middle: char| {
-            format!(
-                "data:image/png;base64,{}{}{}",
-                "A".repeat(1_000),
-                middle.to_string().repeat(18_000),
-                "A".repeat(1_000)
-            )
-        };
-        assert_ne!(
-            super::UrlMap::<()>::hash(&url('B')),
-            super::UrlMap::<()>::hash(&url('C'))
-        );
+        assert_eq!(cache.urls.len(), 3);
     }
 }
