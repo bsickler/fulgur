@@ -64,10 +64,12 @@ pub(super) struct BackgroundLayer<'s> {
 /// image drawn at two sizes in turn is not converted again each time.
 const SIZES_PER_URL: usize = 4;
 
-/// A map from URL strings that hashes a string by its length and ends
-/// only. A `data:` URL can be megabytes long and is looked up on every
-/// draw; a lookup still compares the whole string, but neither hashes nor
-/// copies it.
+/// A map from URL strings that hashes a string by its length and evenly
+/// spaced samples of it. A `data:` URL can be megabytes long and is looked
+/// up on every draw; a lookup still compares the whole string, but neither
+/// hashes nor copies it. Encoded images of the same length share their
+/// headers and trailers but differ throughout their data, which the
+/// samples reach.
 struct UrlMap<V> {
     buckets: HashMap<u64, Vec<(Box<str>, V)>>,
 }
@@ -82,15 +84,19 @@ impl<V> Default for UrlMap<V> {
 
 impl<V> UrlMap<V> {
     fn hash(key: &str) -> u64 {
-        const SAMPLE: usize = 256;
+        const SAMPLE: usize = 32;
+        const SAMPLES: usize = 32;
         let bytes = key.as_bytes();
         let mut state = DefaultHasher::new();
         bytes.len().hash(&mut state);
-        if bytes.len() <= 2 * SAMPLE {
+        if bytes.len() <= SAMPLE * SAMPLES {
             bytes.hash(&mut state);
         } else {
-            bytes[..SAMPLE].hash(&mut state);
-            bytes[bytes.len() - SAMPLE..].hash(&mut state);
+            let last = bytes.len() - SAMPLE;
+            for index in 0..SAMPLES {
+                let start = last * index / (SAMPLES - 1);
+                bytes[start..start + SAMPLE].hash(&mut state);
+            }
         }
         state.finish()
     }
@@ -462,5 +468,22 @@ mod tests {
             assert_eq!(cache.resolve_cached(raw), cache.resolve(raw));
         }
         assert_eq!(cache.urls.buckets.values().map(Vec::len).sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn long_urls_that_differ_in_the_middle_hash_apart() {
+        // Same length, header and trailer; different data in between.
+        let url = |middle: char| {
+            format!(
+                "data:image/png;base64,{}{}{}",
+                "A".repeat(1_000),
+                middle.to_string().repeat(18_000),
+                "A".repeat(1_000)
+            )
+        };
+        assert_ne!(
+            super::UrlMap::<()>::hash(&url('B')),
+            super::UrlMap::<()>::hash(&url('C'))
+        );
     }
 }
