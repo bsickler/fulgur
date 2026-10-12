@@ -505,12 +505,29 @@ pub fn resolve(doc: &mut HtmlDocument) {
 /// covered too. Each step only runs when the source is unsafe, so a clean
 /// document is left untouched and repeated calls never re-escape text.
 fn sanitize_inline_svgs(doc: &mut HtmlDocument) {
+    let is_svg = |node: &blitz_dom::Node| {
+        node.element_data()
+            .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+    };
+    // Blitz parses only the outermost `<svg>`: construction stops there, so
+    // a nested one is never parsed on its own, and checking it as a
+    // standalone document would miss ids declared in the outer one.
     let svg_ids: Vec<usize> = doc
         .tree()
         .iter()
+        .filter(|(_, node)| is_svg(node))
         .filter(|(_, node)| {
-            node.element_data()
-                .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+            let mut parent = node.parent;
+            while let Some(parent_id) = parent {
+                let Some(ancestor) = doc.get_node(parent_id) else {
+                    break;
+                };
+                if is_svg(ancestor) {
+                    return false;
+                }
+                parent = ancestor.parent;
+            }
+            true
         })
         .map(|(node_id, _)| node_id)
         .collect();
@@ -4635,6 +4652,22 @@ mod tests {
         let tree = extract_inline_svg_tree(doc.get_node(svg_id).unwrap().element_data().unwrap())
             .expect("blitz parsed the inline svg");
         assert_eq!(crate::svg::count_images(tree.root()), 0);
+    }
+
+    #[test]
+    fn resolve_keeps_nested_svg_feimage_links_to_outer_ids() {
+        let html = r##"<html><body><svg width="10" height="10"><rect id="shape" width="10" height="10"/><svg><filter id="f"><feImage href="#shape"/></filter></svg><image href="/etc/secret.png"/></svg></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        let href = |local: &str| {
+            doc.tree()
+                .iter()
+                .filter_map(|(_, node)| node.element_data())
+                .find(|elem| elem.name.local.as_ref() == local)
+                .and_then(|elem| get_attr(elem, "href").map(str::to_owned))
+        };
+        assert_eq!(href("feImage").as_deref(), Some("#shape"));
+        assert_eq!(href("image"), None);
     }
 
     #[test]

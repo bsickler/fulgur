@@ -116,9 +116,12 @@ pub(crate) fn scan_image_refs(text: &str) -> Option<ImageRefScan> {
         ..Default::default()
     };
     let doc = roxmltree::Document::parse_with_options(text, options).ok()?;
+    // usvg builds its tree, and so its id map, from elements in the SVG
+    // namespace or in no namespace.
     let svg_ids = doc
         .descendants()
-        .filter(|node| node.tag_name().namespace() == Some(SVG_NS))
+        .filter(|node| node.is_element())
+        .filter(|node| matches!(node.tag_name().namespace(), None | Some(SVG_NS)))
         .filter_map(|node| node.attribute("id"))
         .map(str::to_owned)
         .collect::<std::collections::HashSet<_>>();
@@ -149,20 +152,22 @@ const SVG_NS: &str = "http://www.w3.org/2000/svg";
 /// Whether usvg resolves the `href` of an `image` / `feImage` element
 /// without its string resolver, which reads the filesystem by default.
 ///
-/// usvg decodes a value as a `data:` URL first (it needs the scheme and a
-/// comma) and treats an `feImage` `#id` as a link when an SVG element with
-/// that id exists. Anything else, including an unmatched fragment, falls
-/// through to the string resolver.
+/// Mirrors usvg 0.45 with the same crates it uses: a value that
+/// `data_url::DataUrl::process` accepts is decoded inline
+/// (`parser/image.rs`, `get_href_data`), and an `feImage` value that
+/// `svgtypes::IRI` parses to the id of an existing SVG element is followed as
+/// a link (`parser/svgtree/mod.rs`, `node_attribute`). Anything else,
+/// including a malformed data URL or an unmatched fragment, falls through to
+/// the string resolver.
 pub(crate) fn is_self_contained_image_href(
     element: &str,
     value: &str,
     has_svg_id: impl Fn(&str) -> bool,
 ) -> bool {
-    let is_data_url = value
-        .get(..5)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
-        && value.contains(',');
-    is_data_url || (element == "feImage" && value.strip_prefix('#').is_some_and(has_svg_id))
+    if data_url::DataUrl::process(value).is_ok() {
+        return true;
+    }
+    element == "feImage" && svgtypes::IRI::from_str(value).is_ok_and(|iri| has_svg_id(iri.0))
 }
 
 /// Outcome of [`sanitize_svg_payload`].
@@ -435,47 +440,23 @@ mod tests {
     #[test]
     fn self_contained_image_href_policy() {
         let none = |_: &str| false;
-        let shape = |id: &str| id == "shape";
-        assert!(is_self_contained_image_href(
-            "image",
-            "data:image/png;base64,AAAA",
-            none
-        ));
-        assert!(is_self_contained_image_href(
-            "image",
-            "DATA:image/png,x",
-            none
-        ));
-        // usvg needs a comma to decode a data URL; without one the value
-        // goes to the string resolver as a path.
-        assert!(!is_self_contained_image_href(
-            "image",
-            "data:secret.png",
-            none
-        ));
-        assert!(!is_self_contained_image_href(
-            "image",
-            " data:image/png,x",
-            none
-        ));
-        assert!(!is_self_contained_image_href(
-            "image",
-            "/etc/secret.png",
-            none
-        ));
-        assert!(!is_self_contained_image_href(
-            "image",
-            "file:///etc/secret.png",
-            none
-        ));
-        assert!(!is_self_contained_image_href("image", "#shape", shape));
-        assert!(is_self_contained_image_href("feImage", "#shape", shape));
-        assert!(!is_self_contained_image_href(
-            "feImage",
-            "#missing.png",
-            shape
-        ));
-        assert!(!is_self_contained_image_href("image", "", none));
+        let ids = |id: &str| matches!(id, "shape" | "foo" | "foo bar");
+        let image = |value: &str| is_self_contained_image_href("image", value, none);
+        let fe_image = |value: &str| is_self_contained_image_href("feImage", value, ids);
+        assert!(image("data:image/png;base64,AAAA"));
+        assert!(image("DATA:image/png,x"));
+        // Values `DataUrl::process` rejects go to the string resolver as a
+        // path.
+        assert!(!image("data:secret.png"));
+        assert!(!image("data:#,/secret.png"));
+        assert!(!image("/etc/secret.png"));
+        assert!(!image("file:///etc/secret.png"));
+        assert!(!image(""));
+        assert!(!is_self_contained_image_href("image", "#shape", ids));
+        assert!(fe_image("#shape"));
+        assert!(!fe_image("#missing.png"));
+        // The id exists, but usvg's IRI parser rejects the fragment.
+        assert!(!fe_image("#foo bar"));
     }
 
     #[test]
@@ -535,5 +516,12 @@ mod tests {
             sanitize_svg_payload(TEST_PNG_1X1),
             SvgPayload::Unchanged
         ));
+    }
+
+    #[test]
+    fn scan_image_refs_sees_ids_in_namespace_less_svg() {
+        let svg = r##"<svg width="10" height="10"><filter id="f"><feImage href="#shape"/></filter><rect id="shape" width="10" height="10"/></svg>"##;
+        let scan = scan_image_refs(svg).unwrap();
+        assert!(scan.unsafe_attrs.is_empty());
     }
 }
