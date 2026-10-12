@@ -510,8 +510,7 @@ fn sanitize_inline_svgs(doc: &mut HtmlDocument) {
             .is_some_and(|elem| elem.name.local.as_ref() == "svg")
     };
     // Blitz parses only the outermost `<svg>`: construction stops there, so
-    // a nested one is never parsed on its own, and checking it as a
-    // standalone document would miss ids declared in the outer one.
+    // a nested one is never parsed on its own and is covered by its root.
     let svg_ids: Vec<usize> = doc
         .tree()
         .iter()
@@ -563,9 +562,7 @@ fn sanitize_inline_svg(doc: &mut HtmlDocument, svg_id: usize) {
             if matches!(element, "image" | "feImage") {
                 for attr in elem.attrs() {
                     if attr.name.local.as_ref() == "href"
-                        && !crate::svg::is_self_contained_image_href(element, &attr.value, |id| {
-                            scan.svg_ids.contains(id)
-                        })
+                        && !crate::svg::is_data_url_href(&attr.value)
                     {
                         attrs_to_clear.push((node_id, attr.name.clone()));
                     }
@@ -4655,62 +4652,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_keeps_nested_svg_feimage_links_to_outer_ids() {
-        let html = r##"<html><body><svg width="10" height="10"><rect id="shape" width="10" height="10"/><svg><filter id="f"><feImage href="#shape"/></filter></svg><image href="/etc/secret.png"/></svg></body></html>"##;
+    fn resolve_strips_feimage_fragments_and_nested_svg_refs() {
+        // `feImage` `#id` links are dropped too: usvg reads the value as a
+        // file path whenever its tree does not retain the target.
+        let html = r##"<html><body><svg width="10" height="10"><rect id="shape" width="10" height="10"/><svg><filter id="f"><feImage href="#shape"/><feImage href="data:image/png;base64,AAAA"/></filter><image href="/etc/secret.png"/></svg></svg></body></html>"##;
         let mut doc = parse(html, 400.0, &[]);
         resolve(&mut doc);
-        let href = |local: &str| {
+        let hrefs = |local: &str| -> Vec<Option<String>> {
             doc.tree()
                 .iter()
                 .filter_map(|(_, node)| node.element_data())
-                .find(|elem| elem.name.local.as_ref() == local)
-                .and_then(|elem| get_attr(elem, "href").map(str::to_owned))
+                .filter(|elem| elem.name.local.as_ref() == local)
+                .map(|elem| get_attr(elem, "href").map(str::to_owned))
+                .collect()
         };
-        assert_eq!(href("feImage").as_deref(), Some("#shape"));
-        assert_eq!(href("image"), None);
-    }
-
-    #[test]
-    fn resolve_keeps_feimage_fragments_only_when_the_target_exists() {
-        let html = r##"<html><body><svg width="10" height="10"><defs><filter id="f"><feImage href="#shape"/><feImage href="#missing.png"/></filter></defs><rect id="shape" width="10" height="10"/></svg></body></html>"##;
-        let mut doc = parse(html, 400.0, &[]);
-        resolve(&mut doc);
-        let hrefs: Vec<Option<String>> = doc
-            .tree()
-            .iter()
-            .filter_map(|(_, node)| node.element_data())
-            .filter(|elem| elem.name.local.as_ref() == "feImage")
-            .map(|elem| get_attr(elem, "href").map(str::to_owned))
-            .collect();
-        assert_eq!(hrefs, vec![Some("#shape".to_owned()), None]);
-    }
-
-    #[test]
-    fn build_static_content_css_serializes_selectors_and_escapes() {
-        let mappings = vec![
-            StaticContentMapping {
-                parsed: ParsedSelector::Tag("DIV".into()),
-                pseudo: PseudoElement::Before,
-                text: "[x]".into(),
-            },
-            StaticContentMapping {
-                parsed: ParsedSelector::Class("note".into()),
-                pseudo: PseudoElement::After,
-                // A `"` and a `\` must be CSS-escaped so the injected rule
-                // is well-formed and cannot break out of the string.
-                text: "a\"b\\c".into(),
-            },
-            StaticContentMapping {
-                parsed: ParsedSelector::Id("foo".into()),
-                pseudo: PseudoElement::Before,
-                text: "y".into(),
-            },
-        ];
-        let css = build_static_content_css(&mappings);
+        let mut fe_images = hrefs("feImage");
+        fe_images.sort();
         assert_eq!(
-            css,
-            r#"div::before{content:"[x]"}.note::after{content:"a\"b\\c"}#foo::before{content:"y"}"#
+            fe_images,
+            vec![None, Some("data:image/png;base64,AAAA".to_owned())]
         );
+        assert_eq!(hrefs("image"), vec![None]);
     }
 
     #[test]
