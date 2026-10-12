@@ -17,12 +17,30 @@ pub(crate) enum Href {
     External(String),
 }
 
+/// One clickable area of a link on the PDF page, in pt.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Area {
+    /// An area whose sides follow the page axes.
+    Rect(Rect),
+    /// An area that a rotation or skew turned off the page axes.
+    Quad(Quadrilateral),
+}
+
+impl From<Area> for Quadrilateral {
+    fn from(area: Area) -> Self {
+        match area {
+            Area::Rect(rect) => rect.into(),
+            Area::Quad(quad) => quad,
+        }
+    }
+}
+
 /// One link of a page: its `<a>` element, its target, and its areas on the
-/// PDF page in pt.
+/// PDF page.
 pub(crate) struct PageLink {
     pub(crate) owner: NodeId,
     pub(crate) href: Href,
-    pub(crate) rects: Vec<Rect>,
+    pub(crate) areas: Vec<Area>,
 }
 
 impl PageLink {
@@ -43,10 +61,10 @@ impl PageLink {
                 Target::Action(Action::Goto(destination.into()))
             }
         };
-        Some(match self.rects.as_slice() {
-            [rect] => LinkAnnotation::new(*rect, target),
-            rects => LinkAnnotation::new_with_quad_points(
-                rects.iter().copied().map(Quadrilateral::from).collect(),
+        Some(match self.areas.as_slice() {
+            [Area::Rect(rect)] => LinkAnnotation::new(*rect, target),
+            areas => LinkAnnotation::new_with_quad_points(
+                areas.iter().copied().map(Quadrilateral::from).collect(),
                 target,
             ),
         })
@@ -89,11 +107,57 @@ impl Placement {
         clip: None,
     };
 
-    /// `quad` moved to the PDF page and cut to the clip, `None` when
-    /// nothing of it is visible.
-    fn place(self, quad: PaintRect) -> Option<PaintRect> {
-        let mut x0 = quad.x + self.origin.0;
-        let mut y0 = quad.y + self.origin.1;
+    /// A paint-space quad (corners top-left, top-right, bottom-right,
+    /// bottom-left of its layout rectangle, in CSS px) moved to the PDF page
+    /// and converted to pt. A quad whose sides follow the page axes is cut
+    /// to the clip; one turned off the axes is kept whole when its bounding
+    /// box meets the clip. `None` when nothing of it is visible.
+    fn place(self, corners: [(f32, f32); 4]) -> Option<Area> {
+        if !corners
+            .iter()
+            .all(|corner| corner.0.is_finite() && corner.1.is_finite())
+        {
+            return None;
+        }
+        let corners = corners.map(|(x, y)| (x + self.origin.0, y + self.origin.1));
+        let [c0, c1, c2, c3] = corners;
+        let xs = corners.map(|corner| corner.0);
+        let ys = corners.map(|corner| corner.1);
+        let (x0, x1) = (
+            xs.into_iter().fold(f32::INFINITY, f32::min),
+            xs.into_iter().fold(f32::NEG_INFINITY, f32::max),
+        );
+        let (y0, y1) = (
+            ys.into_iter().fold(f32::INFINITY, f32::min),
+            ys.into_iter().fold(f32::NEG_INFINITY, f32::max),
+        );
+        let bounds = PaintRect::new(x0, y0, x1 - x0, y1 - y0);
+        // Translations, scales and quarter turns keep the sides on the axes.
+        let axis_aligned = (c0.1 == c1.1 && c2.1 == c3.1 && c0.0 == c3.0 && c1.0 == c2.0)
+            || (c0.0 == c1.0 && c2.0 == c3.0 && c0.1 == c3.1 && c1.1 == c2.1);
+        if axis_aligned {
+            let rect = self.cut(bounds)?;
+            return Rect::from_xywh(
+                rect.x * PX_TO_PT,
+                rect.y * PX_TO_PT,
+                rect.width * PX_TO_PT,
+                rect.height * PX_TO_PT,
+            )
+            .map(Area::Rect);
+        }
+        self.cut(bounds)?;
+        // QuadPoints start at the bottom-left of the area and go counter-
+        // clockwise, as krilla's rectangles do; the layout rectangle's
+        // bottom edge runs from its bottom-left to its bottom-right corner.
+        Some(Area::Quad(Quadrilateral(
+            [c3, c2, c1, c0].map(|(x, y)| Point::from_xy(x * PX_TO_PT, y * PX_TO_PT)),
+        )))
+    }
+
+    /// `quad` cut to the clip, `None` when nothing of it is visible.
+    fn cut(self, quad: PaintRect) -> Option<PaintRect> {
+        let mut x0 = quad.x;
+        let mut y0 = quad.y;
         let mut x1 = x0 + quad.width;
         let mut y1 = y0 + quad.height;
         if let Some(clip) = self.clip {
@@ -120,34 +184,18 @@ pub(crate) fn links(
         let Some(href) = href(targets.base_url, targets.document_url, link.target) else {
             continue;
         };
-        let mut rects = Vec::new();
-        for quad in link.quads {
-            if ![quad.x, quad.y, quad.width, quad.height]
-                .iter()
-                .all(|value| value.is_finite())
-                || quad.width <= 0.0
-                || quad.height <= 0.0
-            {
-                continue;
-            }
-            let Some(quad) = placement.place(*quad) else {
-                continue;
-            };
-            let Some(rect) = Rect::from_xywh(
-                quad.x * PX_TO_PT,
-                quad.y * PX_TO_PT,
-                quad.width * PX_TO_PT,
-                quad.height * PX_TO_PT,
-            ) else {
-                continue;
-            };
-            rects.push(rect);
-        }
-        if !rects.is_empty() {
+        // The areas where the painter draws the link's content, moved by
+        // relative offsets and transforms.
+        let areas: Vec<Area> = link
+            .paint_quads
+            .iter()
+            .filter_map(|corners| placement.place(*corners))
+            .collect();
+        if !areas.is_empty() {
             links.push(PageLink {
                 owner: link.owner,
                 href,
-                rects,
+                areas,
             });
         }
     }
@@ -156,11 +204,34 @@ pub(crate) fn links(
 
 #[cfg(test)]
 mod tests {
-    use super::Placement;
+    use super::{Area, Placement};
+    use fulgur_core::units::PX_TO_PT;
+    use krilla::geom::{Point, Quadrilateral, Rect};
     use raikiri_html::PaintRect;
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> PaintRect {
         PaintRect::new(x, y, width, height)
+    }
+
+    fn corners(x: f32, y: f32, width: f32, height: f32) -> [(f32, f32); 4] {
+        [
+            (x, y),
+            (x + width, y),
+            (x + width, y + height),
+            (x, y + height),
+        ]
+    }
+
+    fn pt_rect(x: f32, y: f32, width: f32, height: f32) -> Area {
+        Area::Rect(
+            Rect::from_xywh(
+                x * PX_TO_PT,
+                y * PX_TO_PT,
+                width * PX_TO_PT,
+                height * PX_TO_PT,
+            )
+            .unwrap(),
+        )
     }
 
     #[test]
@@ -169,14 +240,48 @@ mod tests {
             origin: (10.0, 20.0),
             clip: Some(rect(0.0, 0.0, 40.0, 30.0)),
         };
-        assert_eq!(
-            placement.place(rect(5.0, 5.0, 50.0, 50.0)),
-            Some(rect(15.0, 25.0, 25.0, 5.0))
+        assert!(
+            placement.place(corners(5.0, 5.0, 50.0, 50.0)) == Some(pt_rect(15.0, 25.0, 25.0, 5.0))
         );
-        assert_eq!(placement.place(rect(40.0, 0.0, 10.0, 10.0)), None);
-        assert_eq!(
-            Placement::PAGE.place(rect(1.0, 2.0, 3.0, 4.0)),
-            Some(rect(1.0, 2.0, 3.0, 4.0))
+        assert!(placement.place(corners(40.0, 0.0, 10.0, 10.0)).is_none());
+        assert!(
+            Placement::PAGE.place(corners(1.0, 2.0, 3.0, 4.0)) == Some(pt_rect(1.0, 2.0, 3.0, 4.0))
         );
+        assert!(
+            Placement::PAGE
+                .place([(f32::NAN, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+                .is_none()
+        );
+        assert!(Placement::PAGE.place(corners(1.0, 2.0, 0.0, 4.0)).is_none());
+    }
+
+    // A quarter turn keeps the sides on the page axes, so the area stays a
+    // rectangle: its bounding box.
+    #[test]
+    fn a_quarter_turn_gives_a_rectangle() {
+        let turned = [(20.0, 0.0), (20.0, 20.0), (10.0, 20.0), (10.0, 0.0)];
+        assert!(Placement::PAGE.place(turned) == Some(pt_rect(10.0, 0.0, 10.0, 20.0)));
+    }
+
+    // A rotation off the axes keeps its four corners, from the layout
+    // rectangle's bottom-left corner counter-clockwise.
+    #[test]
+    fn a_rotation_off_the_axes_gives_a_quadrilateral() {
+        let rotated = [(10.0, 0.0), (20.0, 10.0), (10.0, 20.0), (0.0, 10.0)];
+        let point = |x: f32, y: f32| Point::from_xy(x * PX_TO_PT, y * PX_TO_PT);
+        assert!(
+            Placement::PAGE.place(rotated)
+                == Some(Area::Quad(Quadrilateral([
+                    point(0.0, 10.0),
+                    point(10.0, 20.0),
+                    point(20.0, 10.0),
+                    point(10.0, 0.0),
+                ])))
+        );
+        let clipped = Placement {
+            origin: (0.0, 0.0),
+            clip: Some(rect(30.0, 30.0, 10.0, 10.0)),
+        };
+        assert!(clipped.place(rotated).is_none());
     }
 }

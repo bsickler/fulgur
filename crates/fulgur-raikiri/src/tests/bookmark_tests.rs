@@ -304,3 +304,17 @@ fn bookmark_bundle_defaults_yield_to_author_style() {
     assert_eq!(children.len(), 1);
     assert_eq!(title(children[0]), "Bundle");
 }
+
+// A heading moved by a transform is bookmarked where it is drawn.
+#[test]
+fn bookmark_follows_a_transformed_heading() {
+    let (_dir, path) = input(&format!(
+        "{BOOK_CSS}<h1 style='transform:translate(10px,20px)'>A</h1>"
+    ));
+    let bytes = render(&path, &Config::builder().bookmarks(true).build()).unwrap();
+    let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+    let items = outline_children(&pdf, outline_root(&pdf));
+    let dest = outline_destination(&pdf, items[0]);
+    assert_eq!(dest[2].as_float().unwrap(), 7.5);
+    assert_eq!(dest[3].as_float().unwrap(), 135.0);
+}

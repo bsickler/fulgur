@@ -139,9 +139,18 @@ impl OutlineBuilder {
             {
                 continue;
             }
+            // The heading is where the painter draws it, after relative
+            // offsets and transforms.
+            let Some(point) = page
+                .paint_transform(node)
+                .map(|transform| transform.apply((rect.x, rect.y)))
+                .filter(|point| point.0.is_finite() && point.1.is_finite())
+            else {
+                continue;
+            };
             let position = XyzDestination::new(
                 page.index() as usize,
-                Point::from_xy(rect.x * PX_TO_PT, rect.y * PX_TO_PT),
+                Point::from_xy(point.0 * PX_TO_PT, point.1 * PX_TO_PT),
             );
             self.positions
                 .entry(node)
