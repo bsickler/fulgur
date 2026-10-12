@@ -142,6 +142,31 @@ pub(crate) fn is_data_url_href(value: &str) -> bool {
     data_url::DataUrl::process(value).is_ok()
 }
 
+/// Upper bound on the decompressed size of a gzip payload the sanitizer
+/// expands. Every fetched resource passes through the sanitizer, so without
+/// a bound a small gzip bomb (even one served as a stylesheet) could exhaust
+/// memory. Matches the per-image limit of the asset bundle.
+const MAX_SVGZ_DECODED_BYTES: usize = 64 * 1024 * 1024;
+
+enum SvgzError {
+    Malformed,
+    TooLarge,
+}
+
+/// `usvg::decompress_svgz` with a limit on the decompressed size.
+fn decompress_svgz(bytes: &[u8], limit: usize) -> Result<Vec<u8>, SvgzError> {
+    use std::io::Read;
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .take(limit as u64 + 1)
+        .read_to_end(&mut decoded)
+        .map_err(|_| SvgzError::Malformed)?;
+    if decoded.len() > limit {
+        return Err(SvgzError::TooLarge);
+    }
+    Ok(decoded)
+}
+
 /// Outcome of [`sanitize_svg_payload`].
 pub(crate) enum SvgPayload {
     /// Not an SVG usvg can parse, or an SVG with no unsafe references:
@@ -163,13 +188,16 @@ pub(crate) enum SvgPayload {
 pub(crate) fn sanitize_svg_payload(bytes: &[u8]) -> SvgPayload {
     let decompressed;
     let data = if bytes.starts_with(&[0x1f, 0x8b]) {
-        match usvg::decompress_svgz(bytes) {
+        match decompress_svgz(bytes, MAX_SVGZ_DECODED_BYTES) {
             Ok(data) => {
                 decompressed = data;
                 &decompressed[..]
             }
             // usvg fails on the same input, so it never resolves anything.
-            Err(_) => return SvgPayload::Unchanged,
+            Err(SvgzError::Malformed) => return SvgPayload::Unchanged,
+            // Too large to scan; a later unrestricted parse would expand it
+            // unchecked, so drop it.
+            Err(SvgzError::TooLarge) => return SvgPayload::Rejected,
         }
     } else {
         bytes
@@ -471,6 +499,31 @@ mod tests {
             sanitize_svg_payload(&payload),
             SvgPayload::Unchanged
         ));
+    }
+
+    #[test]
+    fn decompress_svgz_stops_at_the_limit() {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[b' '; 1024]).unwrap();
+        let gz = encoder.finish().unwrap();
+        assert_eq!(decompress_svgz(&gz, 1024).ok().map(|d| d.len()), Some(1024));
+        assert!(matches!(
+            decompress_svgz(&gz, 1023),
+            Err(SvgzError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn sanitize_svg_payload_rejects_gzip_over_the_limit() {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let chunk = vec![b' '; 1024 * 1024];
+        for _ in 0..=MAX_SVGZ_DECODED_BYTES / chunk.len() {
+            encoder.write_all(&chunk).unwrap();
+        }
+        let bomb = encoder.finish().unwrap();
+        assert!(matches!(sanitize_svg_payload(&bomb), SvgPayload::Rejected));
     }
 
     #[test]

@@ -25,6 +25,8 @@ usvg = "0.45"
 # Same version usvg 0.45 decodes image hrefs with; the SVG sanitizer in
 # `svg.rs` must classify `data:` URLs exactly the way usvg does.
 data-url = "0.3"
+# Bounded SVGZ decompression in the SVG sanitizer (usvg's is unbounded).
+flate2 = "1.1.9"
 blitz-html = "0.2"
 blitz-dom = "0.2"
 blitz-traits = "0.2"
@@ -50,5 +52,4 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-flate2 = "1.1.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
