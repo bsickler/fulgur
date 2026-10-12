@@ -458,6 +458,28 @@ mod tests {
             assert!(cache.sized_image(&url, side, side).unwrap().is_some());
         }
         assert_eq!(cache.images.get(url.as_str()).unwrap().len(), 2);
+
+        // Past four sizes the oldest goes.
+        let source = Sizes((1..=5).map(image).collect());
+        let mut cache = RasterCache::for_tests(Some(&source));
+        for side in 1..=5 {
+            assert!(cache.sized_image(&url, side as f32, 1.0).unwrap().is_some());
+        }
+        let widths: Vec<_> = cache
+            .images
+            .get(url.as_str())
+            .unwrap()
+            .iter()
+            .map(|(pixels, _)| pixels.width)
+            .collect();
+        assert_eq!(widths, [2, 3, 4, 5]);
+
+        // New pixels of a cached size replace the stale entry.
+        let fresh = image(5);
+        cache.image(&url, &fresh).unwrap();
+        let cached = cache.images.get(url.as_str()).unwrap();
+        assert_eq!(cached.len(), 4);
+        assert!(std::sync::Arc::ptr_eq(&cached[3].0, &fresh));
     }
 
     #[test]

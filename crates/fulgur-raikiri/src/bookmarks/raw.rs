@@ -440,7 +440,7 @@ impl<'a> Lexer<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -459,12 +459,19 @@ mod tests {
     /// A PDF with compact dictionaries, so a longer count cannot reuse
     /// whitespace and the objects after it have to move.
     fn compact_pdf() -> Vec<u8> {
-        let objects = [
-            "<</Type/Catalog/Outlines 2 0 R>>",
-            "<</First 3 0 R/Last 3 0 R/Count 1>>",
-            "<</Title(x)/Parent 2 0 R/First 4 0 R/Last 4 0 R/Count -1>>",
-            "<</Title(y)/Parent 3 0 R>>",
-        ];
+        pdf_with(
+            &[
+                "<</Type/Catalog/Outlines 2 0 R>>",
+                "<</First 3 0 R/Last 3 0 R/Count 1>>",
+                "<</Title(x)/Parent 2 0 R/First 4 0 R/Last 4 0 R/Count -1>>",
+                "<</Title(y)/Parent 3 0 R>>",
+            ],
+            "/Root 1 0 R",
+        )
+    }
+
+    /// A PDF of `objects`, numbered from 1, with `trailer` entries.
+    pub(in crate::bookmarks) fn pdf_with(objects: &[&str], trailer: &str) -> Vec<u8> {
         let mut pdf = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (index, object) in objects.iter().enumerate() {
@@ -476,7 +483,13 @@ mod tests {
         for offset in offsets {
             pdf.extend(format!("{offset:010} 00000 n\r\n").bytes());
         }
-        pdf.extend(format!("trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n{table}\n%%EOF\n").bytes());
+        pdf.extend(
+            format!(
+                "trailer\n<</Size {}{trailer}>>\nstartxref\n{table}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .bytes(),
+        );
         pdf
     }
 
@@ -548,5 +561,103 @@ mod tests {
             .unwrap()
             .replace("/Size 5", "/Size 5/Prev 9");
         assert!(RawPdf::new(text.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn lexer_reads_the_object_syntax_around_values() {
+        let bytes = b"<< % comment /Count 1\n/A <48 49> /B (x(y)\\)) /C [1.5 true null] /D << /E /F >> /Count 2 >>";
+        let dictionary = Lexer::new(bytes, 0).dictionary(0).unwrap();
+        assert_eq!(get(&dictionary, b"A"), Some(&Value::Other));
+        assert_eq!(get(&dictionary, b"B"), Some(&Value::Other));
+        assert_eq!(get(&dictionary, b"C"), Some(&Value::Other));
+        assert_eq!(get(&dictionary, b"D"), Some(&Value::Other));
+        assert_eq!(get(&dictionary, b"Count"), Some(&Value::Integer(2)));
+        assert_eq!(dictionary.len(), 5);
+    }
+
+    #[test]
+    fn lexer_rejects_malformed_dictionaries() {
+        let deep = format!("<< /A {}1{} >>", "[".repeat(40), "]".repeat(40));
+        for bytes in [
+            &b"[1]"[..],
+            b"<< /A 1",
+            b"<< 1 2 >>",
+            b"<< /A ] >>",
+            b"<< /A { >>",
+            b"<< /A (open >>",
+            b"<< /A <48",
+            deep.as_bytes(),
+        ] {
+            assert!(
+                Lexer::new(bytes, 0).dictionary(0).is_none(),
+                "{}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_tables_and_trailers_are_rejected() {
+        let pdf = String::from_utf8(compact_pdf()).unwrap();
+        let table = pdf.find("xref").unwrap();
+        let broken = [
+            "%PDF-1.7\n".to_string(),
+            pdf.replacen("startxref\n", "startxref\nx", 1),
+            pdf.replacen(
+                &format!("startxref\n{table}"),
+                &format!("startxref\n{}", table + 1),
+                1,
+            ),
+            pdf.replacen("xref\n0 5", "xref\nx 5", 1),
+            pdf.replacen("xref\n0 5", "xref\n0 x", 1),
+            pdf.replacen("xref\n0 5", "xref\n0 50", 1),
+            pdf.replacen("/Root 1 0 R", "", 1),
+            pdf.replacen("/Root 1 0 R", "/Root 1", 1),
+            pdf.replacen("trailer\n<<", "trailer\n[", 1),
+        ];
+        for pdf in broken {
+            assert!(RawPdf::new(pdf.as_bytes()).is_none(), "{pdf}");
+        }
+    }
+
+    #[test]
+    fn objects_must_be_where_the_table_says() {
+        let pdf = compact_pdf();
+        let raw = RawPdf::new(&pdf).unwrap();
+        assert!(raw.dictionary(9).is_none());
+        let mut moved = RawPdf::new(&pdf).unwrap();
+        let second = moved.offsets[&2];
+        moved.offsets.insert(1, second);
+        assert!(moved.dictionary(1).is_none());
+        moved.offsets.insert(1, moved.table);
+        assert!(moved.dictionary(1).is_none());
+        let text = String::from_utf8(pdf.clone())
+            .unwrap()
+            .replacen("1 0 obj", "1 0 xbj", 1);
+        assert!(
+            RawPdf::new(text.as_bytes())
+                .unwrap()
+                .dictionary(1)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn patch_rejects_overlapping_edits_and_edits_past_the_objects() {
+        let pdf = compact_pdf();
+        let raw = RawPdf::new(&pdf).unwrap();
+        let span = entry(&raw.dictionary(3).unwrap(), b"Count")
+            .unwrap()
+            .span
+            .clone();
+        let table = raw.table;
+        let overlapping = vec![
+            (span.clone(), b"/Count 1".to_vec()),
+            (span.start + 1..span.end, b"/Count 2".to_vec()),
+        ];
+        assert!(patch(pdf.clone(), raw.layout(), overlapping).is_none());
+        let past = vec![(table..table + 4, b"/Count 1".to_vec())];
+        assert!(patch(pdf.clone(), raw.layout(), past).is_none());
+        assert_eq!(patch(pdf.clone(), raw.layout(), Vec::new()), Some(pdf));
     }
 }
