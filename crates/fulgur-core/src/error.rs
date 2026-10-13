@@ -112,6 +112,10 @@ mod tests {
             matches!(err, Error::Template(_)),
             "expected Error::Template, got {err:?}"
         );
-        assert!(!err.to_string().is_empty());
+        assert!(
+            err.to_string().contains("no such variable"),
+            "Error::Template must preserve the minijinja error message; got: {}",
+            err
+        );
     }
 }
