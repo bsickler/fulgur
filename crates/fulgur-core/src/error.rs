@@ -49,43 +49,37 @@ mod tests {
     #[test]
     fn html_parse_error_display() {
         let err = Error::HtmlParse("unexpected end of file".into());
-        assert!(err.to_string().contains("unexpected end of file"));
-        assert!(err.to_string().contains("HTML parse error"));
+        assert_eq!(err.to_string(), "HTML parse error: unexpected end of file");
     }
 
     #[test]
     fn layout_error_display() {
         let err = Error::Layout("grid overflow".into());
-        assert!(err.to_string().contains("grid overflow"));
-        assert!(err.to_string().contains("Layout error"));
+        assert_eq!(err.to_string(), "Layout error: grid overflow");
     }
 
     #[test]
     fn pdf_generation_error_display() {
         let err = Error::PdfGeneration("font embed failed".into());
-        assert!(err.to_string().contains("font embed failed"));
-        assert!(err.to_string().contains("PDF generation error"));
+        assert_eq!(err.to_string(), "PDF generation error: font embed failed");
     }
 
     #[test]
     fn asset_error_display() {
         let err = Error::Asset("image not found: logo.png".into());
-        assert!(err.to_string().contains("image not found: logo.png"));
-        assert!(err.to_string().contains("Asset error"));
+        assert_eq!(err.to_string(), "Asset error: image not found: logo.png");
     }
 
     #[test]
     fn woff_decode_error_display() {
         let err = Error::WoffDecode("bad signature".into());
-        assert!(err.to_string().contains("bad signature"));
-        assert!(err.to_string().contains("WOFF decode error"));
+        assert_eq!(err.to_string(), "WOFF decode error: bad signature");
     }
 
     #[test]
     fn unsupported_font_format_error_display() {
         let err = Error::UnsupportedFontFormat(".eot".into());
-        assert!(err.to_string().contains(".eot"));
-        assert!(err.to_string().contains("Unsupported font format"));
+        assert_eq!(err.to_string(), "Unsupported font format: .eot");
     }
 
     #[test]
