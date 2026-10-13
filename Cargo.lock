@@ -1274,6 +1274,8 @@ dependencies = [
  "blitz-html",
  "blitz-traits",
  "cssparser 0.37.0",
+ "data-url",
+ "flate2",
  "fulgur-core",
  "image",
  "krilla",

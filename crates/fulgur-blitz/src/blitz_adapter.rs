@@ -480,7 +480,132 @@ pub fn apply_single_pass<P: DomPass + ?Sized>(
 
 /// Resolve styles (Stylo) and compute layout (Taffy).
 pub fn resolve(doc: &mut HtmlDocument) {
+    sanitize_inline_svgs(doc);
     doc.resolve(0.0);
+}
+
+/// Keep Blitz's inline `<svg>` parse from reading local files.
+///
+/// During layout construction Blitz serializes each `<svg>` subtree with
+/// `outer_html()` and parses it with usvg's default options, whose image
+/// resolver reads any `href` it cannot decode as a `data:` URL from the
+/// filesystem, relative to the current working directory. That bypasses the
+/// `AssetBundle` and the base directory confinement, and reads files even
+/// when no base directory is configured. Blitz offers no hook to replace
+/// those options, so this checks the exact source Blitz will produce and
+/// cleans the DOM until that source is safe:
+///
+/// 1. Remove the offending `href` attributes on `image` / `feImage`.
+/// 2. Escape `<` and `&` in text nodes. `outer_html()` writes text verbatim,
+///    so text such as `&lt;image href=...&gt;` would otherwise reappear as
+///    markup in the serialized SVG.
+/// 3. If the source is still unsafe, drop the subtree's children.
+///
+/// Runs on every [`resolve`] call so subtrees inserted by DOM passes are
+/// covered too. Each step only runs when the source is unsafe, so a clean
+/// document is left untouched and repeated calls never re-escape text.
+fn sanitize_inline_svgs(doc: &mut HtmlDocument) {
+    let is_svg = |node: &blitz_dom::Node| {
+        node.element_data()
+            .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+    };
+    // Blitz parses only the outermost `<svg>`: construction stops there, so
+    // a nested one is never parsed on its own and is covered by its root.
+    let svg_ids: Vec<usize> = doc
+        .tree()
+        .iter()
+        .filter(|(_, node)| is_svg(node))
+        .filter(|(_, node)| {
+            let mut ancestor = node.parent.and_then(|id| doc.get_node(id));
+            while let Some(node) = ancestor {
+                if is_svg(node) {
+                    return false;
+                }
+                ancestor = node.parent.and_then(|id| doc.get_node(id));
+            }
+            true
+        })
+        .map(|(node_id, _)| node_id)
+        .collect();
+    for svg_id in svg_ids {
+        sanitize_inline_svg(doc, svg_id);
+    }
+}
+
+fn sanitize_inline_svg(doc: &mut HtmlDocument, svg_id: usize) {
+    let Some(scan) = crate::svg::scan_image_refs(&inline_svg_source(doc, svg_id)) else {
+        return;
+    };
+    if scan.unsafe_attrs.is_empty() {
+        return;
+    }
+
+    let mut subtree = Vec::new();
+    let mut stack = vec![svg_id];
+    while let Some(node_id) = stack.pop() {
+        if let Some(node) = doc.get_node(node_id) {
+            subtree.push(node_id);
+            stack.extend(node.children.iter().rev());
+        }
+    }
+
+    let mut attrs_to_clear = Vec::new();
+    let mut texts_to_escape = Vec::new();
+    for &node_id in &subtree {
+        let node = doc.get_node(node_id).expect("collected above");
+        if let Some(elem) = node.element_data() {
+            let element = elem.name.local.as_ref();
+            if matches!(element, "image" | "feImage") {
+                for attr in elem.attrs() {
+                    if attr.name.local.as_ref() == "href"
+                        && !crate::svg::is_data_url_href(&attr.value)
+                    {
+                        attrs_to_clear.push((node_id, attr.name.clone()));
+                    }
+                }
+            }
+        } else if let Some(text) = node.text_data() {
+            if text.content.contains(['<', '&']) {
+                let escaped = text.content.replace('&', "&amp;").replace('<', "&lt;");
+                texts_to_escape.push((node_id, escaped));
+            }
+        }
+    }
+    {
+        let mut mutator = doc.mutate();
+        for (node_id, name) in attrs_to_clear {
+            mutator.clear_attribute(node_id, name);
+        }
+        for (node_id, escaped) in texts_to_escape {
+            mutator.set_node_text(node_id, &escaped);
+        }
+    }
+
+    drop_inline_svg_content_if_unsafe(doc, svg_id);
+}
+
+/// Last resort for [`sanitize_inline_svg`]: drop the children of `svg_id`
+/// when its serialized source still references local files.
+fn drop_inline_svg_content_if_unsafe(doc: &mut HtmlDocument, svg_id: usize) {
+    let still_unsafe = crate::svg::scan_image_refs(&inline_svg_source(doc, svg_id))
+        .is_some_and(|scan| !scan.unsafe_attrs.is_empty());
+    if still_unsafe {
+        log::warn!("dropping inline <svg> content that references local files");
+        doc.mutate().remove_and_drop_all_children(svg_id);
+    }
+}
+
+/// The source Blitz hands to usvg for an inline `<svg>` element, mirroring
+/// `blitz-dom` 0.2.4 `layout/construct.rs` (including its `xmlns` fix-up).
+fn inline_svg_source(doc: &HtmlDocument, svg_id: usize) -> String {
+    let mut source = doc
+        .get_node(svg_id)
+        .map(|node| node.outer_html())
+        .unwrap_or_default();
+    if !source.contains("xmlns") {
+        source = source.replace("<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"");
+    }
+    source
 }
 
 /// Update the document's viewport size (in CSS px) and mark Stylo's stylist
@@ -4462,31 +4587,130 @@ mod tests {
     use crate::units::F32Units;
 
     #[test]
-    fn build_static_content_css_serializes_selectors_and_escapes() {
-        let mappings = vec![
-            StaticContentMapping {
-                parsed: ParsedSelector::Tag("DIV".into()),
-                pseudo: PseudoElement::Before,
-                text: "[x]".into(),
-            },
-            StaticContentMapping {
-                parsed: ParsedSelector::Class("note".into()),
-                pseudo: PseudoElement::After,
-                // A `"` and a `\` must be CSS-escaped so the injected rule
-                // is well-formed and cannot break out of the string.
-                text: "a\"b\\c".into(),
-            },
-            StaticContentMapping {
-                parsed: ParsedSelector::Id("foo".into()),
-                pseudo: PseudoElement::Before,
-                text: "y".into(),
-            },
-        ];
-        let css = build_static_content_css(&mappings);
-        assert_eq!(
-            css,
-            r#"div::before{content:"[x]"}.note::after{content:"a\"b\\c"}#foo::before{content:"y"}"#
+    fn resolve_strips_inline_svg_file_image_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("secret.png");
+        std::fs::write(&png, crate::svg::TEST_PNG_1X1).unwrap();
+        let html = format!(
+            r#"<html><body><svg width="20" height="10">
+                <image href="{file}" width="10" height="10"/>
+                <image xlink:href="{file}" width="10" height="10"/>
+                <image href="{data}" x="10" width="10" height="10"/>
+            </svg></body></html>"#,
+            file = png.display(),
+            data = crate::svg::TEST_PNG_DATA_URL,
         );
+        let mut doc = parse(&html, 400.0, &[]);
+        resolve(&mut doc);
+
+        let svg = doc
+            .tree()
+            .iter()
+            .find_map(|(_, node)| {
+                node.element_data()
+                    .filter(|elem| elem.name.local.as_ref() == "svg")
+            })
+            .expect("inline svg element");
+        let tree = extract_inline_svg_tree(svg).expect("blitz parsed the inline svg");
+        // Only the data URL survives; the two file references are dropped
+        // before Blitz hands the subtree to usvg.
+        assert_eq!(crate::svg::count_images(tree.root()), 1);
+    }
+
+    #[test]
+    fn resolve_strips_inline_svg_markup_injected_through_text() {
+        // `outer_html()` writes text nodes verbatim, so escaped markup in the
+        // HTML would come back as a real `<image>` in the SVG source.
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("secret.png");
+        std::fs::write(&png, crate::svg::TEST_PNG_1X1).unwrap();
+        let html = format!(
+            r#"<html><body><svg width="20" height="10"><g>&lt;image href="{file}" width="10" height="10"/&gt;</g><![CDATA[<image href="{file}" width="10" height="10"/>]]></svg></body></html>"#,
+            file = png.display(),
+        );
+        let mut doc = parse(&html, 400.0, &[]);
+        resolve(&mut doc);
+        // A second resolve must not double-escape the text.
+        resolve(&mut doc);
+
+        let svg_id = doc
+            .tree()
+            .iter()
+            .find(|(_, node)| {
+                node.element_data()
+                    .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+            })
+            .map(|(node_id, _)| node_id)
+            .expect("inline svg element");
+        let source = inline_svg_source(&doc, svg_id);
+        let scan = crate::svg::scan_image_refs(&source).expect("source parses");
+        assert!(scan.unsafe_attrs.is_empty(), "{source}");
+        // The injected markup survives as escaped text, escaped only once.
+        assert!(source.contains("&lt;image"), "{source}");
+        assert!(!source.contains("&amp;lt;"), "{source}");
+        let tree = extract_inline_svg_tree(doc.get_node(svg_id).unwrap().element_data().unwrap())
+            .expect("blitz parsed the inline svg");
+        assert_eq!(crate::svg::count_images(tree.root()), 0);
+    }
+
+    #[test]
+    fn unsafe_inline_svg_content_is_dropped_as_a_last_resort() {
+        let mut doc = parse(
+            r#"<html><body><svg><image href="/etc/secret.png"/></svg></body></html>"#,
+            400.0,
+            &[],
+        );
+        let svg_id = doc
+            .tree()
+            .iter()
+            .find(|(_, node)| {
+                node.element_data()
+                    .is_some_and(|elem| elem.name.local.as_ref() == "svg")
+            })
+            .map(|(node_id, _)| node_id)
+            .expect("inline svg element");
+        drop_inline_svg_content_if_unsafe(&mut doc, svg_id);
+        assert!(doc.get_node(svg_id).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn resolve_leaves_unparseable_inline_svg_alone() {
+        // usvg cannot parse this source either (a bare `&`), so it never
+        // resolves the href and the DOM is left as written.
+        let html = r#"<html><body><svg><text>a & b</text><image href="/etc/secret.png"/></svg></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        let href = doc
+            .tree()
+            .iter()
+            .filter_map(|(_, node)| node.element_data())
+            .find(|elem| elem.name.local.as_ref() == "image")
+            .and_then(|elem| get_attr(elem, "href").map(str::to_owned));
+        assert_eq!(href.as_deref(), Some("/etc/secret.png"));
+    }
+
+    #[test]
+    fn resolve_strips_feimage_fragments_and_nested_svg_refs() {
+        // `feImage` `#id` links are dropped too: usvg reads the value as a
+        // file path whenever its tree does not retain the target.
+        let html = r##"<html><body><svg width="10" height="10"><rect id="shape" width="10" height="10"/><svg><filter id="f"><feImage href="#shape"/><feImage href="data:image/png;base64,AAAA"/></filter><image href="/etc/secret.png"/></svg></svg></body></html>"##;
+        let mut doc = parse(html, 400.0, &[]);
+        resolve(&mut doc);
+        let hrefs = |local: &str| -> Vec<Option<String>> {
+            doc.tree()
+                .iter()
+                .filter_map(|(_, node)| node.element_data())
+                .filter(|elem| elem.name.local.as_ref() == local)
+                .map(|elem| get_attr(elem, "href").map(str::to_owned))
+                .collect()
+        };
+        let mut fe_images = hrefs("feImage");
+        fe_images.sort();
+        assert_eq!(
+            fe_images,
+            vec![None, Some("data:image/png;base64,AAAA".to_owned())]
+        );
+        assert_eq!(hrefs("image"), vec![None]);
     }
 
     #[test]

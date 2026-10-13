@@ -240,6 +240,18 @@ impl NetProvider<Resource> for FulgurNetProvider {
                 (Bytes::from(raw_bytes), None, None, fallback)
             };
 
+        // Blitz parses any payload it cannot decode as a raster image with
+        // usvg's default options, whose image resolver reads `<image href>`
+        // paths from the filesystem relative to the working directory, outside
+        // the base directory. Remove those references from every payload usvg
+        // could parse, whatever its extension or the branch above: the same
+        // file can be both a `<link>` target and an `<img src>`.
+        let bytes_for_blitz = match crate::svg::sanitize_svg_payload(&bytes_for_blitz) {
+            crate::svg::SvgPayload::Unchanged => bytes_for_blitz,
+            crate::svg::SvgPayload::Sanitized(sanitized) => Bytes::from(sanitized),
+            crate::svg::SvgPayload::Rejected => return,
+        };
+
         let is_top_level_import_root = {
             let mut inner = self.inner.lock().unwrap();
             let top = inner.import_depth == 0;
@@ -509,5 +521,44 @@ mod tests {
             provider.drain_gcpm_by_link_node().is_empty(),
             "a rejected fetch must not register a node-id-tagged GCPM entry either"
         );
+    }
+
+    #[test]
+    fn fetch_strips_svg_image_refs_outside_base_path() {
+        // An SVG served from inside the base directory must not be able to
+        // pull in a file outside it through `<image href>`: Blitz parses
+        // the payload with usvg's file-reading default resolver.
+        let parent = tempfile::tempdir().unwrap();
+        let base = parent.path().join("base");
+        fs::create_dir(&base).unwrap();
+        let outside = parent.path().join("secret.png");
+        fs::write(&outside, crate::svg::TEST_PNG_1X1).unwrap();
+        let svg_path = base.join("logo.svg");
+        fs::write(
+            &svg_path,
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"><image href="{}" width="10" height="10"/><rect width="10" height="10"/></svg>"#,
+                outside.display()
+            ),
+        )
+        .unwrap();
+
+        let provider = FulgurNetProvider::new(Some(base));
+        let request = Request::get(Url::from_file_path(&svg_path).unwrap());
+        let recorded = Arc::new(Mutex::new(None));
+        let handler = Box::new(RecordingHandler {
+            bytes: recorded.clone(),
+        });
+        provider.fetch(0, request, handler);
+
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .take()
+            .expect("an SVG inside the base path is still served");
+        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default()).unwrap();
+        assert_eq!(crate::svg::count_images(tree.root()), 0);
+        assert_eq!(tree.size().width(), 10.0);
+        assert_eq!(tree.size().height(), 20.0);
     }
 }
