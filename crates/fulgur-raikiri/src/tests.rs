@@ -1699,6 +1699,27 @@ fn background_clip_border_area_paints_under_the_border() {
     assert_eq!(count(&operations, "f"), 0);
 }
 
+#[test]
+fn margin_box_background_color_follows_the_bottom_layer_clip() {
+    // CSS Backgrounds 3 §2.2: the color is clipped like the bottom layer;
+    // `border-area` fills the ring under the border, even-odd.
+    let page = |clip: &str| {
+        operations(&format!(
+            "<style>@page {{ size: 300px 200px; margin: 40px; @top-center {{ content: 'H'; \
+             border: 5px solid transparent; padding: 3px; background-color: rgb(0, 128, 0); \
+             background-clip: {clip} }} }} body {{ margin: 0 }}</style><p>body</p>"
+        ))
+        .1
+    };
+    let ring = page("border-area");
+    assert!(fill_colors(&ring).contains(&[0, 128, 0]));
+    assert_eq!(count(&ring, "f*"), 1);
+    // `text` has no glyph shape for margin boxes, so the color is skipped,
+    // as Raikiri's own painter does.
+    assert!(!fill_colors(&page("text")).contains(&[0, 128, 0]));
+    assert!(fill_colors(&page("content-box")).contains(&[0, 128, 0]));
+}
+
 mod assets_tests;
 
 mod metadata_tests;

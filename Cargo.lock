@@ -1620,13 +1620,13 @@ dependencies = [
 
 [[package]]
 name = "harfrust"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
+checksum = "86aa776d6d32b072119e1f1650f4db843ff4382a4aaa6a2c9c4e35703cd377cb"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
- "read-fonts 0.41.0",
+ "read-fonts 0.45.0",
  "smallvec",
 ]
 
@@ -1824,7 +1824,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -3175,9 +3175,10 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 [[package]]
 name = "raikiri-dom"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=cf15746c3b9033fc3628ba7423ad06ce5fe94a91#cf15746c3b9033fc3628ba7423ad06ce5fe94a91"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=0ee01c4b914d992c021dc9fe0ff4107feef0d3bd#0ee01c4b914d992c021dc9fe0ff4107feef0d3bd"
 dependencies = [
  "bitflags 2.11.0",
+ "cssparser 0.37.0",
  "raikiri-style",
  "raikiri-traits",
  "rayon",
@@ -3193,7 +3194,7 @@ dependencies = [
 [[package]]
 name = "raikiri-html"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=cf15746c3b9033fc3628ba7423ad06ce5fe94a91#cf15746c3b9033fc3628ba7423ad06ce5fe94a91"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=0ee01c4b914d992c021dc9fe0ff4107feef0d3bd#0ee01c4b914d992c021dc9fe0ff4107feef0d3bd"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3214,7 +3215,7 @@ dependencies = [
 [[package]]
 name = "raikiri-net"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=cf15746c3b9033fc3628ba7423ad06ce5fe94a91#cf15746c3b9033fc3628ba7423ad06ce5fe94a91"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=0ee01c4b914d992c021dc9fe0ff4107feef0d3bd#0ee01c4b914d992c021dc9fe0ff4107feef0d3bd"
 dependencies = [
  "data-url",
  "image",
@@ -3226,7 +3227,7 @@ dependencies = [
 [[package]]
 name = "raikiri-style"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=cf15746c3b9033fc3628ba7423ad06ce5fe94a91#cf15746c3b9033fc3628ba7423ad06ce5fe94a91"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=0ee01c4b914d992c021dc9fe0ff4107feef0d3bd#0ee01c4b914d992c021dc9fe0ff4107feef0d3bd"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3239,7 +3240,7 @@ dependencies = [
 [[package]]
 name = "raikiri-svg"
 version = "0.1.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=cf15746c3b9033fc3628ba7423ad06ce5fe94a91#cf15746c3b9033fc3628ba7423ad06ce5fe94a91"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=0ee01c4b914d992c021dc9fe0ff4107feef0d3bd#0ee01c4b914d992c021dc9fe0ff4107feef0d3bd"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3253,7 +3254,7 @@ dependencies = [
 [[package]]
 name = "raikiri-traits"
 version = "0.2.0"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=cf15746c3b9033fc3628ba7423ad06ce5fe94a91#cf15746c3b9033fc3628ba7423ad06ce5fe94a91"
+source = "git+https://github.com/fulgur-rs/raikiri?rev=0ee01c4b914d992c021dc9fe0ff4107feef0d3bd#0ee01c4b914d992c021dc9fe0ff4107feef0d3bd"
 dependencies = [
  "bytes",
  "libc",
@@ -3412,6 +3413,18 @@ dependencies = [
  "bytemuck",
  "font-types 0.12.6",
  "once_cell",
+]
+
+[[package]]
+name = "read-fonts"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a5b7bed3d16ab428d8fa533640ab805ff50e7ad8a4d00649de1259e70023282"
+dependencies = [
+ "bytemuck",
+ "font-types 0.12.6",
+ "once_cell",
+ "yoke",
 ]
 
 [[package]]
@@ -3842,20 +3855,20 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shodo"
-version = "0.0.26"
+version = "0.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "132183c0a60e047fc2c29feaa97af08499019f3f7adce79b70ddd9cc0708f6ef"
+checksum = "77ec6b5f91fd2db5d27654277cd9e321a94787862f9639a1a6fe49c2c77e8e77"
 dependencies = [
  "foldhash 0.2.0",
  "fontique 0.11.1",
- "harfrust 0.12.0",
+ "harfrust 0.14.0",
  "icu_casemap",
  "icu_locale_core",
  "icu_normalizer",
  "icu_properties",
  "icu_segmenter",
  "peniko",
- "skrifa 0.44.0",
+ "skrifa 0.48.0",
  "unicode-bidi",
 ]
 
@@ -3918,6 +3931,16 @@ checksum = "526e654b303ff4ad73a5a40b25de2b3ce3d039c5e3b6da5f89ae6e57004cb40f"
 dependencies = [
  "bytemuck",
  "read-fonts 0.44.0",
+]
+
+[[package]]
+name = "skrifa"
+version = "0.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5213b4825bac3587046330052d61bfac7bd3bd0d203c758d7c2ef726fcea034"
+dependencies = [
+ "bytemuck",
+ "read-fonts 0.45.0",
 ]
 
 [[package]]
