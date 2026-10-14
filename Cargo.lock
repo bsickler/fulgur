@@ -1360,7 +1360,9 @@ name = "fulgur-wpt"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "fontique 0.11.1",
  "fulgur",
+ "fulgur-raikiri",
  "fulgur-vrt",
  "image",
  "log",
