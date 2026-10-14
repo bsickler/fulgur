@@ -168,7 +168,7 @@ fn translucent_first_line_draws_the_split_inline_box_line_by_line() {
         forms.iter().any(|form| form.contains("0 0 1 rg")),
         "{forms:?}"
     );
-    let content = pdf.get_page_content(pdf.get_pages()[&1]).unwrap();
+    let content = pdf.get_page_content(pdf.get_pages()[&1]);
     let content = String::from_utf8_lossy(&content);
     assert!(content.contains("0 0 1 rg"), "{content}");
 }

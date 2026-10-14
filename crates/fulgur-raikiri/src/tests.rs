@@ -194,9 +194,7 @@ fn hidden_boxes_and_transparent_text_draw_nothing() {
     let text = pdf.extract_text(&[1]).expect("extractable text");
     assert_eq!(text.split_whitespace().collect::<Vec<_>>(), ["kept"]);
     // Nothing red is filled: the hidden box draws no background or border.
-    let content = pdf
-        .get_page_content(*pdf.get_pages().get(&1).unwrap())
-        .unwrap();
+    let content = pdf.get_page_content(*pdf.get_pages().get(&1).unwrap());
     let content = String::from_utf8_lossy(&content);
     assert!(!content.contains("1 0 0 rg"), "{content}");
 }
@@ -293,9 +291,7 @@ fn margin_boxes_draw_the_running_element_of_each_page() {
     assert_eq!(words(1), ["Alpha", "one"]);
     assert_eq!(words(2), ["Beta", "two"]);
     // The element is drawn as laid out, with its background.
-    let content = pdf
-        .get_page_content(*pdf.get_pages().get(&1).unwrap())
-        .unwrap();
+    let content = pdf.get_page_content(*pdf.get_pages().get(&1).unwrap());
     let operations = lopdf::content::Content::decode(&content)
         .unwrap()
         .operations;
@@ -337,7 +333,7 @@ fn operations_with(
     let pdf = lopdf::Document::load_mem(&bytes).expect("a readable PDF");
     let mut operations = Vec::new();
     for page in pdf.get_pages().values() {
-        let content = pdf.get_page_content(*page).unwrap();
+        let content = pdf.get_page_content(*page);
         operations.extend(
             lopdf::content::Content::decode(&content)
                 .unwrap()
@@ -1308,7 +1304,7 @@ fn body_overflow_clips_when_the_root_overflow_is_not_visible() {
 /// Decoded operations of one page's content stream.
 fn page_operations(pdf: &lopdf::Document, page: u32) -> Vec<lopdf::content::Operation> {
     let id = *pdf.get_pages().get(&page).unwrap();
-    lopdf::content::Content::decode(&pdf.get_page_content(id).unwrap())
+    lopdf::content::Content::decode(&pdf.get_page_content(id))
         .unwrap()
         .operations
 }
