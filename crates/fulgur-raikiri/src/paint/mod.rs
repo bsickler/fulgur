@@ -458,14 +458,30 @@ fn paint_legacy(
         paint_replaced(surface, page, &fragment, svg, raster, tags, false)?;
     }
     // Content images are replaced content of their pseudo-element, so they
-    // go with the other replaced content, below the text.
+    // go with the other replaced content, below the text. Like the text,
+    // they are drawn where the enclosing transforms put them.
+    let mut spaces = vec![PaintTransform::IDENTITY];
     for event in events {
-        if let PaintEvent::GeneratedImage(image) = event
-            && let Some(placement) = raster.generated_image(page, *image)
-        {
-            let chain = clips.chain(page, placement.clip_owner, placement.rect);
-            active.apply(surface, &clips, &chain);
-            paint_content_image(surface, page, raster, tags, *image, &placement, false)?;
+        match event {
+            PaintEvent::PushTransform(own) => {
+                let space = *spaces.last().unwrap_or(&PaintTransform::IDENTITY);
+                spaces.push(space * *own);
+            }
+            PaintEvent::PopTransform => {
+                spaces.pop();
+            }
+            PaintEvent::GeneratedImage(image) => {
+                if let Some(placement) = raster.generated_image(page, *image) {
+                    let chain = clips.chain(page, placement.clip_owner, placement.rect);
+                    active.apply(surface, &clips, &chain);
+                    let space = *spaces.last().unwrap_or(&PaintTransform::IDENTITY);
+                    let moved = (space != PaintTransform::IDENTITY).then_some(space);
+                    transform::with(surface, moved, |surface| {
+                        paint_content_image(surface, page, raster, tags, *image, &placement, false)
+                    })?;
+                }
+            }
+            _ => {}
         }
     }
     // Text goes above every block background and border.

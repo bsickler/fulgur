@@ -640,6 +640,38 @@ fn after_images_follow_the_element_text() {
 }
 
 #[test]
+fn generated_text_and_images_keep_their_content_list_order() {
+    let image = "url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+                 width='8' height='8'><rect width='8' height='8'/></svg>\")";
+    // Paint draws the line's image before its text; the structure follows
+    // the `content` list instead.
+    let pdf = tagged_pdf(
+        &format!("<style>p::before{{content:'Note: ' {image} ' end '}}</style><p>Body</p>"),
+        &tagged(),
+    );
+    assert_eq!(paragraph_leaves(&pdf), "TITT");
+}
+
+#[test]
+fn generated_images_on_mixed_direction_lines_keep_paint_order() {
+    let image = "url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+                 width='8' height='8'><rect width='8' height='8'/></svg>\")";
+    // A line that mixes bidi directions gives the image no offset, so it
+    // keeps its place before the line's text.
+    let pdf = tagged_pdf(
+        &format!(
+            "<style>p::before{{content:'Note: ' {image} ' \u{5e9}\u{5dc}\u{5d5}\u{5dd} '}}</style>\
+             <p>Body</p>"
+        ),
+        &tagged(),
+    );
+    // The number of text runs depends on the fonts that cover Hebrew.
+    let leaves = paragraph_leaves(&pdf);
+    assert!(leaves.starts_with('I'), "{leaves}");
+    assert!(leaves[1..].len() >= 2 && leaves[1..].chars().all(|kind| kind == 'T'));
+}
+
+#[test]
 fn links_are_named_by_nested_image_alt_text() {
     let pdf = tagged_pdf(
         "<p><a href='https://example.com/'><span> \
