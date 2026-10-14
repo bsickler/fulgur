@@ -402,11 +402,13 @@ fn execute_and_report(
         report_dir.join("regressions.json"),
         serde_json::to_string_pretty(&regressions)?,
     )?;
-    if let Some(diff) = &baseline_diff {
-        std::fs::write(
-            report_dir.join("baseline-diff.json"),
-            serde_json::to_string_pretty(diff)?,
-        )?;
+    let diff_path = report_dir.join("baseline-diff.json");
+    match &baseline_diff {
+        Some(diff) => std::fs::write(&diff_path, serde_json::to_string_pretty(diff)?)?,
+        // Drop a comparison left by an earlier run so the artifacts match
+        // this run's summary.
+        None if diff_path.exists() => std::fs::remove_file(&diff_path)?,
+        None => {}
     }
     let title = match backend.subdir() {
         None => label.to_string(),
@@ -765,6 +767,20 @@ mod tests {
         assert_eq!(outcome.report_dir, report_dir);
         assert_eq!(outcome.baseline_diff.unwrap().compared, 0);
         assert!(report_dir.join("baseline-diff.json").is_file());
+
+        // A rerun without a baseline removes the stale comparison.
+        let outcome = execute_and_report(
+            ws.path(),
+            "lbl",
+            Vec::new(),
+            ExpectationFile::default(),
+            96,
+            Backend::Raikiri,
+            None,
+        )
+        .unwrap();
+        assert!(outcome.baseline_diff.is_none());
+        assert!(!report_dir.join("baseline-diff.json").exists());
         let report = std::fs::read_to_string(report_dir.join("report.json")).unwrap();
         assert!(report.contains("\"fulgur-raikiri\""), "{report}");
     }
