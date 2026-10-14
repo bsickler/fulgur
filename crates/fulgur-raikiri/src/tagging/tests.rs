@@ -191,7 +191,7 @@ fn repeated_table_headers_are_tagged_once() {
     let mut marks = String::new();
     kids(&pdf, header[0].get(b"K").unwrap(), &mut marks);
     assert_eq!(marks, "#");
-    let second = pdf.get_page_content(pdf.get_pages()[&2]).unwrap();
+    let second = pdf.get_page_content(pdf.get_pages()[&2]);
     assert!(
         String::from_utf8_lossy(&second).contains("/Artifact"),
         "the repeated header is an artifact on later pages"
@@ -229,8 +229,7 @@ fn box_decorations_and_margin_boxes_are_artifacts() {
         "<style>@page { @bottom-center { content: 'Footer' } } p { background: red }</style><p>Body</p>",
         &tagged(),
     );
-    let content =
-        String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1]).unwrap()).into_owned();
+    let content = String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1])).into_owned();
     assert!(content.contains("/Artifact"), "{content}");
     assert!(content.contains("/Footer"), "{content}");
     assert_eq!(outline(&pdf), "Document[P[#]]");
@@ -242,8 +241,7 @@ fn text_shadows_are_artifacts() {
         "<p style='text-shadow: 2px 2px red, 4px 4px blue'>Body</p>",
         &tagged(),
     );
-    let content =
-        String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1]).unwrap()).into_owned();
+    let content = String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1])).into_owned();
     assert!(content.contains("/Artifact"), "{content}");
     assert_eq!(outline(&pdf), "Document[P[#]]");
 }
@@ -538,8 +536,7 @@ fn running_elements_are_footer_and_header_artifacts() {
          <div class='hdr'><a href='https://example.com/'>Home</a></div><p>Body</p>",
         &config,
     );
-    let content =
-        String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1]).unwrap()).into_owned();
+    let content = String::from_utf8_lossy(&pdf.get_page_content(pdf.get_pages()[&1])).into_owned();
     assert!(content.contains("/Header"), "{content}");
     let page = pdf.get_dictionary(pdf.get_pages()[&1]).unwrap();
     let annotation = resolve(&pdf, &page.get(b"Annots").unwrap().as_array().unwrap()[0])
@@ -578,7 +575,7 @@ fn generated_content_images_are_tagged_in_reading_order() {
 /// text, `I` for an image, whether an XObject or filled vector paths.
 fn mcid_kinds(pdf: &Document) -> std::collections::HashMap<i64, char> {
     let page_id = *pdf.get_pages().values().next().unwrap();
-    let content = lopdf::content::Content::decode(&pdf.get_page_content(page_id).unwrap()).unwrap();
+    let content = lopdf::content::Content::decode(&pdf.get_page_content(page_id)).unwrap();
     let mut kinds = std::collections::HashMap::new();
     let mut open: Vec<Option<i64>> = Vec::new();
     for operation in &content.operations {

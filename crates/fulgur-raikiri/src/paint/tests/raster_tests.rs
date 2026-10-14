@@ -106,8 +106,7 @@ fn legacy_pages_keep_raster_pixels_and_own_opacity_and_allow_no_source() {
             );
         }
         let page_id = *parsed.get_pages().values().next().unwrap();
-        let content =
-            lopdf::content::Content::decode(&parsed.get_page_content(page_id).unwrap()).unwrap();
+        let content = lopdf::content::Content::decode(&parsed.get_page_content(page_id)).unwrap();
         assert!(
             content
                 .operations
@@ -201,8 +200,7 @@ fn ordered_marker_events_can_be_rendered_without_a_pixel_provider() {
             .count();
         assert_eq!(images, usize::from(with_source));
         let page_id = *parsed.get_pages().values().next().unwrap();
-        let content =
-            lopdf::content::Content::decode(&parsed.get_page_content(page_id).unwrap()).unwrap();
+        let content = lopdf::content::Content::decode(&parsed.get_page_content(page_id)).unwrap();
         let saves = content
             .operations
             .iter()
@@ -327,8 +325,7 @@ fn images_and_draws(bytes: &[u8]) -> (Vec<Vec<u8>>, Vec<lopdf::content::Operatio
         .map(|stream| stream.decompressed_content().unwrap())
         .collect();
     let page_id = *parsed.get_pages().values().next().unwrap();
-    let content =
-        lopdf::content::Content::decode(&parsed.get_page_content(page_id).unwrap()).unwrap();
+    let content = lopdf::content::Content::decode(&parsed.get_page_content(page_id)).unwrap();
     (images, content.operations)
 }
 
