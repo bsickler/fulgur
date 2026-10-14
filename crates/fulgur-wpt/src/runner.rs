@@ -145,7 +145,7 @@ pub fn run_phase(
     let tests = collect_reftest_files(&dir)
         .with_context(|| format!("collect reftest files in {}", dir.display()))?;
 
-    let outcome = execute_and_report(
+    execute_and_report(
         workspace_root,
         subdir,
         tests,
@@ -153,8 +153,8 @@ pub fn run_phase(
         dpi,
         backend,
         baseline,
-    )?;
-    Ok(Some(outcome))
+    )
+    .map(Some)
 }
 
 /// Run exactly the reftests enumerated in `expectations_path` — keys of
@@ -558,18 +558,11 @@ fn write_summary(
         writeln!(f, "\n#### vs Blitz (declared expectations)\n")?;
         writeln!(f, "- compared: {}", diff.compared)?;
         writeln!(f, "- PASS on both: {}", diff.both_pass)?;
-        writeln!(
-            f,
-            "- PASS here, FAIL on Blitz: {}",
-            diff.backend_only_pass.len()
-        )?;
-        writeln!(
-            f,
-            "- FAIL here, PASS on Blitz: {}",
-            diff.baseline_only_pass.len()
-        )?;
-        write_test_list(&mut f, "PASS here, FAIL on Blitz", &diff.backend_only_pass)?;
-        write_test_list(&mut f, "FAIL here, PASS on Blitz", &diff.baseline_only_pass)?;
+        let (here, blitz) = (&diff.backend_only_pass, &diff.baseline_only_pass);
+        writeln!(f, "- PASS here, FAIL on Blitz: {}", here.len())?;
+        writeln!(f, "- FAIL here, PASS on Blitz: {}", blitz.len())?;
+        write_test_list(&mut f, "PASS here, FAIL on Blitz", here)?;
+        write_test_list(&mut f, "FAIL here, PASS on Blitz", blitz)?;
     }
     Ok(())
 }

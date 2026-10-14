@@ -171,15 +171,20 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "raikiri")]
     #[test]
-    fn raikiri_name_depends_on_feature() {
-        let parsed = Backend::from_name(Some("raikiri"));
-        if cfg!(feature = "raikiri") {
-            assert_eq!(parsed.unwrap(), Backend::Raikiri);
-        } else {
-            let err = parsed.unwrap_err();
-            assert!(err.to_string().contains("--features raikiri"), "{err}");
-        }
+    fn raikiri_name_selects_raikiri() {
+        assert_eq!(
+            Backend::from_name(Some("raikiri")).unwrap(),
+            Backend::Raikiri
+        );
+    }
+
+    #[cfg(not(feature = "raikiri"))]
+    #[test]
+    fn raikiri_name_needs_the_feature() {
+        let err = Backend::from_name(Some("raikiri")).unwrap_err();
+        assert!(err.to_string().contains("--features raikiri"), "{err}");
     }
 
     #[test]
@@ -226,18 +231,26 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    #[cfg(feature = "raikiri")]
     #[test]
-    fn raikiri_renders_or_reports_missing_feature() {
+    fn raikiri_renders_a_pdf() {
         let dir = tempfile::tempdir().unwrap();
-        let out = Backend::Raikiri.render_pdf("<p>hi</p>", dir.path(), None);
-        if cfg!(feature = "raikiri") {
-            assert!(out.unwrap().starts_with(b"%PDF"));
-        } else {
-            let err = out.unwrap_err();
-            assert!(
-                err.to_string().contains("without the `raikiri` feature"),
-                "{err}"
-            );
-        }
+        let pdf = Backend::Raikiri
+            .render_pdf("<p>hi</p>", dir.path(), None)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[cfg(not(feature = "raikiri"))]
+    #[test]
+    fn raikiri_render_needs_the_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Backend::Raikiri
+            .render_pdf("<p>hi</p>", dir.path(), None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("without the `raikiri` feature"),
+            "{err}"
+        );
     }
 }
