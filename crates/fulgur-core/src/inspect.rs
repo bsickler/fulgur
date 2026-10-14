@@ -3683,7 +3683,10 @@ mod tests {
         // even if it returns Ok([]) the observable guarantee still holds.
         let garbage = vec![0x80u8, 0x00, 0x81, 0xff, 0xfe, 0xfd, 0x82, 0x83];
         let result = inspect_bytes(&make_pdf_with_raw_content(garbage));
-        assert!(result.text_items.is_empty(), "corrupt content stream must produce no text items");
+        assert!(
+            result.text_items.is_empty(),
+            "corrupt content stream must produce no text items"
+        );
         assert_eq!(result.pages, 1, "page must still be counted");
     }
 
@@ -3692,7 +3695,10 @@ mod tests {
     fn corrupt_content_stream_produces_no_image_items() {
         let garbage = vec![0x80u8, 0x00, 0x81, 0xff, 0xfe, 0xfd, 0x82, 0x83];
         let result = inspect_bytes(&make_pdf_with_image_and_raw_content(garbage));
-        assert!(result.images.is_empty(), "corrupt content stream must produce no image items");
+        assert!(
+            result.images.is_empty(),
+            "corrupt content stream must produce no image items"
+        );
         assert_eq!(result.pages, 1, "page must still be counted");
     }
 }
