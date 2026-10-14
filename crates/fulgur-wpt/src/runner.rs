@@ -770,6 +770,41 @@ mod tests {
     }
 
     #[test]
+    fn execute_and_report_compares_rendered_tests_with_baseline() {
+        if !poppler_available() {
+            eprintln!("skip: no pdftocairo");
+            return;
+        }
+        let ws = tempdir().unwrap();
+        let dir = ws.path().join("target/wpt/css/t");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = r#"<body style="margin:0"><div style="width:20px;height:20px;background:green"></div></body>"#;
+        std::fs::write(
+            dir.join("a.html"),
+            format!(r#"<!DOCTYPE html><link rel="match" href="a-ref.html">{body}"#),
+        )
+        .unwrap();
+        std::fs::write(dir.join("a-ref.html"), format!("<!DOCTYPE html>{body}")).unwrap();
+        let declared = ExpectationFile::parse("PASS  css/t/a.html\n").unwrap();
+        let baseline = ExpectationFile::parse("FAIL  css/t/a.html\n").unwrap();
+
+        let outcome = execute_and_report(
+            ws.path(),
+            "t",
+            vec![dir.join("a.html")],
+            declared,
+            96,
+            Backend::Blitz,
+            Some(baseline),
+        )
+        .unwrap();
+        assert_eq!(outcome.pass, 1, "{outcome:?}");
+        let diff = outcome.baseline_diff.unwrap();
+        assert_eq!(diff.backend_only_pass, vec!["css/t/a.html".to_string()]);
+        assert!(ws.path().join("target/wpt-run/a/work").is_dir());
+    }
+
+    #[test]
     fn run_list_and_phase_load_the_blitz_baseline() {
         let ws = tempdir().unwrap();
         std::fs::create_dir_all(ws.path().join("target/wpt/css/empty")).unwrap();
@@ -781,18 +816,16 @@ mod tests {
         let base = exp_root.join("list.txt");
         std::fs::write(&base, "").unwrap();
 
-        // Both return None when pdftocairo is not installed.
-        if let Some(o) =
-            run_list(ws.path(), "list", &list, 96, Backend::Raikiri, Some(&base)).unwrap()
-        {
-            assert!(o.baseline_diff.is_some());
-        }
-        if let Some(o) = run_phase(ws.path(), "empty", 96, Backend::Raikiri).unwrap() {
-            assert!(o.baseline_diff.is_some());
-        }
-        if let Some(o) = run_phase(ws.path(), "empty", 96, Backend::Blitz).unwrap() {
-            assert!(o.baseline_diff.is_none());
-        }
+        // Each returns None when pdftocairo is not installed.
+        let ws = ws.path();
+        let with_base = run_list(ws, "list", &list, 96, Backend::Raikiri, Some(&base));
+        assert!(with_base.unwrap().is_none_or(|o| o.baseline_diff.is_some()));
+        let no_base = run_list(ws, "list", &list, 96, Backend::Raikiri, None);
+        assert!(no_base.unwrap().is_none_or(|o| o.baseline_diff.is_none()));
+        let phase = run_phase(ws, "empty", 96, Backend::Raikiri);
+        assert!(phase.unwrap().is_none_or(|o| o.baseline_diff.is_some()));
+        let phase = run_phase(ws, "empty", 96, Backend::Blitz);
+        assert!(phase.unwrap().is_none_or(|o| o.baseline_diff.is_none()));
     }
 
     #[test]

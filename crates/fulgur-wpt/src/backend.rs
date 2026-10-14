@@ -217,6 +217,16 @@ mod tests {
     }
 
     #[test]
+    fn blitz_renders_with_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = fulgur::asset::AssetBundle::new();
+        let pdf = Backend::Blitz
+            .render_pdf("<p>hi</p>", dir.path(), Some(&assets))
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
     fn raikiri_renders_or_reports_missing_feature() {
         let dir = tempfile::tempdir().unwrap();
         let out = Backend::Raikiri.render_pdf("<p>hi</p>", dir.path(), None);
