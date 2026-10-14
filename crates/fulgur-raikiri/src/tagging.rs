@@ -101,7 +101,7 @@ impl Tags {
         let Some(tagger) = &mut self.0 else {
             return draw(surface);
         };
-        match tagger.resolve(page.dom(), target) {
+        match tagger.resolve(page, target) {
             Mark::Artifact(kind) => {
                 surface.start_tagged(ContentTag::Artifact(kind));
                 let result = draw(surface);
@@ -251,8 +251,16 @@ enum Mark {
 }
 
 /// Sort key of an item within its structure element: the DOM preorder
-/// position of its source, then the order in which it was drawn.
-type Key = (u32, u64);
+/// position of its source, its [`Place`] in the text, then the order in
+/// which it was drawn.
+type Key = (u32, Place, u64);
+
+/// Where generated content sits in the text of its pseudo-element: the
+/// line index in its paragraph and the UTF-8 offset in that line's
+/// processed text. Ordering by it puts the text and images of one `content`
+/// list in reading order, while paint draws a line's images before its
+/// text. Other content has the default place and keeps its drawing order.
+type Place = (usize, usize);
 
 struct Element {
     tag: PdfTag,
@@ -577,12 +585,16 @@ impl Tagger {
         false
     }
 
-    fn resolve(&mut self, dom: DomView<'_>, target: Target<'_, '_>) -> Mark {
+    fn resolve(&mut self, page: &Page<'_>, target: Target<'_, '_>) -> Mark {
+        let dom = page.dom();
         let (source, element) = match target {
             Target::Artifact(kind) => return Mark::Artifact(kind),
             Target::Run(run) => match run.source {
                 RunSource::Text(text) => (text, dom.parent(text)),
-                RunSource::Generated(owner, kind) => return self.generated(dom, owner, kind),
+                RunSource::Generated(owner, kind) => {
+                    let place = (run.line.index, run.text_offset);
+                    return self.generated(dom, owner, kind, place);
+                }
                 // Ellipses and anything else stand in for content that is
                 // already in the structure, or decorate it.
                 _ => return Mark::Artifact(ArtifactType::Other),
@@ -591,8 +603,16 @@ impl Tagger {
                 return Mark::Artifact(ArtifactType::Other);
             }
             Target::Replaced(node) => (node, Some(node)),
-            // Content images sit in their pseudo-element's line like its text.
-            Target::GeneratedImage(image) => return self.generated(dom, image.owner, image.kind),
+            // Content images sit in their pseudo-element's line like its
+            // text. On a line that mixes bidi directions the image has no
+            // offset and goes before the line's text, as paint draws it.
+            Target::GeneratedImage(image) => {
+                let place = page
+                    .generated_image_text_position(image)
+                    .map(|(line, offset)| (line.index, offset.unwrap_or(0)))
+                    .unwrap_or_default();
+                return self.generated(dom, image.owner, image.kind, place);
+            }
             Target::MarkerImage(owner) => {
                 if self.is_repeat_copy(dom, owner) {
                     return Mark::Artifact(ArtifactType::Other);
@@ -600,7 +620,7 @@ impl Tagger {
                 return match self.structure.labels.get(&owner) {
                     Some(&label) => {
                         let order = self.order(owner).0;
-                        self.content(label, order)
+                        self.content(label, order, Place::default())
                     }
                     None => Mark::Artifact(ArtifactType::Other),
                 };
@@ -610,13 +630,19 @@ impl Tagger {
             return Mark::Artifact(ArtifactType::Other);
         }
         let key = self.order(source).0;
-        self.content_at(dom, source, element, key)
+        self.content_at(dom, source, element, key, Place::default())
     }
 
     /// Content generated for `owner`: a list marker belongs to the item's
     /// label, `::before` content precedes the element's own content and
     /// `::after` content follows it.
-    fn generated(&mut self, dom: DomView<'_>, owner: NodeId, kind: GeneratedKind) -> Mark {
+    fn generated(
+        &mut self,
+        dom: DomView<'_>,
+        owner: NodeId,
+        kind: GeneratedKind,
+        place: Place,
+    ) -> Mark {
         if self.is_repeat_copy(dom, owner) {
             return Mark::Artifact(ArtifactType::Other);
         }
@@ -624,14 +650,16 @@ impl Tagger {
         if kind == GeneratedKind::Marker
             && let Some(&label) = self.structure.labels.get(&owner)
         {
-            return self.content(label, order);
+            // A label holds the marker alone, kept in drawing order like
+            // a marker image.
+            return self.content(label, order, Place::default());
         }
         let key = if kind == GeneratedKind::After {
             end
         } else {
             order
         };
-        self.content_at(dom, owner, Some(owner), key)
+        self.content_at(dom, owner, Some(owner), key, place)
     }
 
     fn order(&self, node: NodeId) -> (u32, u32) {
@@ -649,6 +677,7 @@ impl Tagger {
         source: NodeId,
         element: Option<NodeId>,
         key: u32,
+        place: Place,
     ) -> Mark {
         let container = match self.structure.container(dom, source) {
             Some(container) => container,
@@ -666,12 +695,12 @@ impl Tagger {
                     .or_insert_with(|| self.structure.push(None, PdfTag::P, order))
             }
         };
-        self.content(container, key)
+        self.content(container, key, place)
     }
 
-    fn content(&mut self, element: usize, key: u32) -> Mark {
+    fn content(&mut self, element: usize, key: u32, place: Place) -> Mark {
         self.sequence += 1;
-        Mark::Content(element, (key, self.sequence))
+        Mark::Content(element, (key, place, self.sequence))
     }
 
     fn push_content(&mut self, element: usize, key: Key, id: Identifier) {
@@ -707,7 +736,7 @@ impl Tagger {
             .into_iter()
             .map(|child| {
                 let order = self.structure.elements[child].order;
-                ((order, 0), Item::Child(child))
+                ((order, Place::default(), 0), Item::Child(child))
             })
             .collect();
         items.extend(
