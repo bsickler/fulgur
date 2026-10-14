@@ -557,11 +557,14 @@ fn overflow_hidden_clips_descendants_to_the_padding_box() {
     let (_, hidden) = operations(&format!(
         "{CSS}<div style=\"height: 40px; border: 5px solid black; overflow: hidden\">{child}</div>"
     ));
-    // One clip, kept for the child's background and its text, at the
-    // padding box: the border box at (20, 20) inset by the 5px border, 40px
-    // high.
-    assert_eq!(count(&hidden, "W"), 1, "{hidden:?}");
-    assert_eq!(clip_bounds(&hidden), [[25.0, 25.0, 275.0, 65.0]]);
+    // The child's background and its text are painted in separate phases
+    // (CSS 2 Appendix E), each under the clip at the padding box: the border
+    // box at (20, 20) inset by the 5px border, 40px high.
+    assert_eq!(count(&hidden, "W"), 2, "{hidden:?}");
+    assert_eq!(
+        clip_bounds(&hidden),
+        [[25.0, 25.0, 275.0, 65.0], [25.0, 25.0, 275.0, 65.0]]
+    );
 }
 
 #[test]
@@ -1160,11 +1163,17 @@ fn clip_switches_between_sibling_overflow_boxes() {
          <p style=\"background-color: green\">after</p>"
     ));
     let bounds = clip_bounds(&operations);
-    // Each subtree draws its box and text together, then switches to the
-    // second clip after popping the first.
+    // The block backgrounds of both subtrees are painted before their text
+    // (CSS 2 Appendix E), so each phase switches from the first clip to the
+    // second after popping the first.
     assert_eq!(
         bounds,
-        [[20.0, 20.0, 280.0, 40.0], [20.0, 40.0, 280.0, 60.0],]
+        [
+            [20.0, 20.0, 280.0, 40.0],
+            [20.0, 40.0, 280.0, 60.0],
+            [20.0, 20.0, 280.0, 40.0],
+            [20.0, 40.0, 280.0, 60.0],
+        ]
     );
     // Every pushed clip is popped: the graphics states balance.
     assert_eq!(count(&operations, "q"), count(&operations, "Q"));

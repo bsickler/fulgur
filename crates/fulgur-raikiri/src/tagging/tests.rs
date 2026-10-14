@@ -254,12 +254,14 @@ fn pdf_ua_output_validates() {
         .lang("en")
         .build();
     let pdf = tagged_pdf(
-        "<h1>Report</h1><p>Body with <a href='https://example.com/'>a link</a>.</p>\
+        "<style>p::before{content:'* ' / 'Note: '} p::after{content:' ~' / ''}</style>\
+         <h1>Report</h1><p>Body with <a href='https://example.com/'>a link</a>.</p>\
          <ul><li>Item</li></ul>",
         &config,
     );
     let catalog = pdf.catalog().unwrap();
     assert!(catalog.has(b"StructTreeRoot"));
+    assert_eq!(text(elements(&pdf, b"Span")[0], b"Alt"), "Note: ");
     assert!(catalog.has(b"Outlines"), "PDF/UA implies bookmarks");
 }
 
@@ -669,6 +671,74 @@ fn generated_images_on_mixed_direction_lines_keep_paint_order() {
     let leaves = paragraph_leaves(&pdf);
     assert!(leaves.starts_with('I'), "{leaves}");
     assert!(leaves[1..].len() >= 2 && leaves[1..].chars().all(|kind| kind == 'T'));
+}
+
+#[test]
+fn generated_content_with_alternative_text_is_a_span_with_alt() {
+    let image = "url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+                 width='8' height='8'><rect width='8' height='8'/></svg>\")";
+    let pdf = tagged_pdf(
+        &format!(
+            "<style>p::before{{content:{image} ' Note: ' / attr(data-kind) ' note'}}</style>\
+             <p data-kind=Warning>Body</p>"
+        ),
+        &tagged(),
+    );
+    // The image and the text of the pseudo-element share the Span, read in
+    // their content-list order, and the element's own text follows it.
+    assert_eq!(outline(&pdf), "Document[P[Span[# #] #]]");
+    let span = elements(&pdf, b"Span")[0];
+    assert_eq!(text(span, b"Alt"), "Warning note");
+}
+
+#[test]
+fn generated_content_with_empty_alternative_text_is_an_artifact() {
+    let image = "url(\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' \
+                 width='8' height='8'><rect width='8' height='8'/></svg>\")";
+    let pdf = tagged_pdf(
+        &format!(
+            "<style>p::before{{content:{image} ' * ' / ''}} \
+             p::after{{content:' end'}}</style><p>Body</p>"
+        ),
+        &tagged(),
+    );
+    // The decorative `::before` leaves only the text and the `::after`.
+    assert_eq!(paragraph_leaves(&pdf), "TT");
+    assert!(elements(&pdf, b"Span").is_empty());
+}
+
+#[test]
+fn marker_alternative_text_names_the_label() {
+    let pdf = tagged_pdf(
+        "<style>li::marker{content:'* ' / 'Important'}</style><ul><li>First</li></ul>",
+        &tagged(),
+    );
+    assert_eq!(outline(&pdf), "Document[L[LI[Lbl[#] LBody[#]]]]");
+    let label = elements(&pdf, b"Lbl")[0];
+    assert_eq!(text(label, b"Alt"), "Important");
+}
+
+#[test]
+fn decorative_markers_are_artifacts() {
+    // The label stays, but the marker it held is drawn as an artifact.
+    let pdf = tagged_pdf(
+        "<style>li::marker{content:'* ' / ''}</style><ul><li>First</li></ul>",
+        &tagged(),
+    );
+    assert_eq!(outline(&pdf), "Document[L[LI[Lbl[] LBody[#]]]]");
+}
+
+#[test]
+fn markers_outside_list_items_belong_to_their_element() {
+    // A list item that is not an `<li>` has no label, so its marker is
+    // content of the element, before its text.
+    let pdf = tagged_pdf(
+        "<p style='display:list-item;list-style:inside decimal'>Body</p>",
+        &tagged(),
+    );
+    assert!(elements(&pdf, b"Lbl").is_empty());
+    let leaves = paragraph_leaves(&pdf);
+    assert!(leaves.len() >= 2 && leaves.chars().all(|kind| kind == 'T'));
 }
 
 #[test]
