@@ -3817,4 +3817,100 @@ mod tests {
         assert!((x - 6.0).abs() < 1e-5, "x {x}");
         assert!((y - 8.0).abs() < 1e-5, "y {y}");
     }
+
+    // --- Tj operator edge cases ---
+
+    /// `Tj` にホワイトスペースのみの文字列を渡した場合、TextItem は生成されない（line 567 false branch）。
+    #[test]
+    fn tj_whitespace_only_string_produces_no_item() {
+        let content = b"BT /F1 12 Tf 1 0 0 1 10 700 Tm (   ) Tj ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tj with whitespace-only string must produce no text items"
+        );
+    }
+
+    /// `Tj` にオペランドが0個のとき、演算子はスキップされ TextItem は生成されない（line 569 None branch）。
+    #[test]
+    fn tj_no_operands_produces_no_item() {
+        // In a PDF content stream operands precede the operator. Writing `Tj`
+        // with nothing before it leaves the operand list empty.
+        let content = b"BT /F1 12 Tf 1 0 0 1 10 700 Tm Tj ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tj with no operands must produce no text items"
+        );
+    }
+
+    /// `Tj` に文字列でないオペランド（整数）を渡した場合、`as_str()` が Err となりスキップされる（line 568 Err branch）。
+    #[test]
+    fn tj_non_string_operand_produces_no_item() {
+        // `42 Tj` — the operand is an integer, not a string literal.
+        // `text_obj.as_str()` returns Err, so no item is produced.
+        let content = b"BT /F1 12 Tf 1 0 0 1 10 700 Tm 42 Tj ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tj with a non-string operand must produce no text items"
+        );
+    }
+
+    // --- TJ operator edge cases ---
+
+    /// `TJ` にオペランドが0個のとき、演算子はスキップされ TextItem は生成されない（line 596 None branch）。
+    #[test]
+    fn tj_array_no_operands_produces_no_item() {
+        // `TJ` with nothing on the operand stack: `operands.first()` returns None.
+        let content = b"BT /F1 12 Tf 1 0 0 1 10 700 Tm TJ ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "TJ with no operands must produce no text items"
+        );
+    }
+
+    /// `TJ` に配列でないオペランド（整数）を渡した場合、`as_array()` が Err となりスキップされる（line 595 Err branch）。
+    #[test]
+    fn tj_array_non_array_operand_produces_no_item() {
+        // `42 TJ` — the operand is an integer, not an array.
+        // `array_obj.as_array()` returns Err, so no item is produced.
+        let content = b"BT /F1 12 Tf 1 0 0 1 10 700 Tm 42 TJ ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "TJ with a non-array operand must produce no text items"
+        );
+    }
+
+    // --- Content decode failure ---
+
+    /// 完全に不正なバイト列を含むコンテントストリームは gracefully にスキップされ、
+    /// TextItem は生成されないがページカウントは増加する（line 406 Err branch を狙う）。
+    #[test]
+    fn corrupt_content_stream_produces_no_text_items() {
+        // Purely binary bytes, not valid PDF operator syntax.
+        // If `Content::decode` returns Err the `continue` branch fires;
+        // even if it returns Ok([]) the observable guarantee still holds.
+        let garbage = vec![0x80u8, 0x00, 0x81, 0xff, 0xfe, 0xfd, 0x82, 0x83];
+        let result = inspect_bytes(&make_pdf_with_raw_content(garbage));
+        assert!(
+            result.text_items.is_empty(),
+            "corrupt content stream must produce no text items"
+        );
+        assert_eq!(result.pages, 1, "page must still be counted");
+    }
+
+    /// image pass でも不正なコンテントストリームは gracefully にスキップされる（line 889 Err branch を狙う）。
+    #[test]
+    fn corrupt_content_stream_produces_no_image_items() {
+        let garbage = vec![0x80u8, 0x00, 0x81, 0xff, 0xfe, 0xfd, 0x82, 0x83];
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(garbage));
+        assert!(
+            result.images.is_empty(),
+            "corrupt content stream must produce no image items"
+        );
+        assert_eq!(result.pages, 1, "page must still be counted");
+    }
 }
