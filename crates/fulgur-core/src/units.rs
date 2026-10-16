@@ -393,19 +393,14 @@ mod tests {
 
     #[test]
     fn px_is_finite_nan_blindness_of_sign_guards() {
-        // Demonstrates WHY is_finite exists: NaN passes `<= ZERO` silently.
+        // Demonstrates WHY is_finite exists: NaN is incomparable (partial_cmp
+        // returns None), so sign guards using `<=` or `>` return false for NaN
+        // instead of catching it.
         let nan = Px(f32::NAN);
-        // These sign guards are NaN-blind — they all return `false` for NaN,
-        // letting NaN slip through what looks like a rejection.
         assert!(
-            !(nan <= Px::ZERO),
-            "NaN <= ZERO is false — NaN slips through"
+            nan.partial_cmp(&Px::ZERO).is_none(),
+            "NaN partial_cmp returns None — sign guards pass NaN through"
         );
-        assert!(
-            !(nan > Px::ZERO),
-            "NaN > ZERO is false — NaN slips through upward guard too"
-        );
-        // is_finite correctly rejects NaN.
         assert!(!nan.is_finite(), "is_finite correctly rejects NaN");
     }
 }
