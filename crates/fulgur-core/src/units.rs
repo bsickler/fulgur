@@ -362,4 +362,50 @@ mod tests {
     fn pt_const_is_single_source() {
         assert_eq!(PX_TO_PT, 0.75);
     }
+
+    // --- Px::is_finite ---
+    //
+    // `is_finite` exists because the usual sign-guard idioms (`x <= Px::ZERO`,
+    // `x < Px::ZERO`) are NaN-blind: every comparison against NaN returns
+    // `false`, so a NaN leaks through a `<= 0` check and surfaces later as a
+    // violated ordering invariant. `is_finite` must be called at the
+    // boundary where an untyped `f32` first becomes a `Px`.
+
+    #[test]
+    fn px_is_finite_returns_true_for_ordinary_values() {
+        assert!(Px(0.0).is_finite());
+        assert!(Px(1.0).is_finite());
+        assert!(Px(-1.0).is_finite());
+        assert!(Px(f32::MAX).is_finite());
+        assert!(Px(f32::MIN_POSITIVE).is_finite());
+    }
+
+    #[test]
+    fn px_is_finite_returns_false_for_infinity() {
+        assert!(!Px(f32::INFINITY).is_finite());
+        assert!(!Px(f32::NEG_INFINITY).is_finite());
+    }
+
+    #[test]
+    fn px_is_finite_returns_false_for_nan() {
+        assert!(!Px(f32::NAN).is_finite());
+    }
+
+    #[test]
+    fn px_is_finite_nan_blindness_of_sign_guards() {
+        // Demonstrates WHY is_finite exists: NaN passes `<= ZERO` silently.
+        let nan = Px(f32::NAN);
+        // These sign guards are NaN-blind — they all return `false` for NaN,
+        // letting NaN slip through what looks like a rejection.
+        assert!(
+            !(nan <= Px::ZERO),
+            "NaN <= ZERO is false — NaN slips through"
+        );
+        assert!(
+            !(nan > Px::ZERO),
+            "NaN > ZERO is false — NaN slips through upward guard too"
+        );
+        // is_finite correctly rejects NaN.
+        assert!(!nan.is_finite(), "is_finite correctly rejects NaN");
+    }
 }
