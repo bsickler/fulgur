@@ -1857,3 +1857,5 @@ fn rotated_boxes_draw_their_background_and_text_turned() {
     let text = pdf.extract_text(&[1]).unwrap();
     assert!(text.contains("turned"), "{text}");
 }
+
+mod page_map_tests;

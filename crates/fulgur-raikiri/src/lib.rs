@@ -96,6 +96,33 @@ fn render_source(
     config: &Config,
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
+    render_source_inner(source, config, options, false).map(|(pdf, _)| pdf)
+}
+
+/// Render an HTML string and report which pages each element with an `id` landed on.
+///
+/// The PDF and the map come from the same layout pass, so the pages cannot disagree with the
+/// document. Give the elements you want located an `id` before calling; elements without one,
+/// and elements with no visible fragment, are absent from the map.
+///
+/// # Errors
+/// Same as [`render_html_with_options`].
+pub fn render_html_with_page_map(
+    html: &str,
+    base_dir: Option<&Path>,
+    config: &Config,
+    options: &RenderOptions<'_>,
+) -> Result<(Vec<u8>, PageMap)> {
+    render_source_inner(Source::Html { html, base_dir }, config, options, true)
+        .map(|(pdf, map)| (pdf, map.unwrap_or_default()))
+}
+
+fn render_source_inner(
+    source: Source<'_>,
+    config: &Config,
+    options: &RenderOptions<'_>,
+    want_page_map: bool,
+) -> Result<(Vec<u8>, Option<PageMap>)> {
     config.validate()?;
     metadata::build(config, None, None)?;
     with_layout(
@@ -104,7 +131,15 @@ fn render_source(
         options,
         LayoutConfig::default(),
         |status, resources, collector, document_url| {
-            draw(status, resources, config, collector, document_url, options)
+            draw_inner(
+                status,
+                resources,
+                config,
+                collector,
+                document_url,
+                options,
+                want_page_map,
+            )
         },
     )
 }
@@ -151,6 +186,7 @@ impl<'a> Source<'a> {
 }
 
 /// Draw a layout result as PDF bytes.
+#[cfg(test)]
 fn draw(
     status: LayoutStatus,
     resources: &RenderResources<'_>,
@@ -159,6 +195,27 @@ fn draw(
     document_url: &url::Url,
     options: &RenderOptions<'_>,
 ) -> Result<Vec<u8>> {
+    draw_inner(
+        status,
+        resources,
+        config,
+        collector,
+        document_url,
+        options,
+        false,
+    )
+    .map(|(pdf, _)| pdf)
+}
+
+fn draw_inner(
+    status: LayoutStatus,
+    resources: &RenderResources<'_>,
+    config: &Config,
+    collector: bookmarks::BookmarkCollector,
+    document_url: &url::Url,
+    options: &RenderOptions<'_>,
+    want_page_map: bool,
+) -> Result<(Vec<u8>, Option<PageMap>)> {
     // `LayoutStatus` is non-exhaustive; anything but a completed layout,
     // including an abort, leaves no pages to draw.
     let LayoutStatus::Completed(document) = status else {
@@ -173,9 +230,11 @@ fn draw(
         bookmarks::BookmarkOutline::default()
     };
     let outline = want_bookmarks.then_some(bookmarks.outline);
+    let page_map = want_page_map.then(|| page_map::page_map(&document));
     let (pdf, rotations) =
         paint::paint_document(&document, resources, config, outline, document_url, options)?;
-    rotations.apply(bookmarks::apply_open_state(pdf, &bookmarks.open)?)
+    let pdf = rotations.apply(bookmarks::apply_open_state(pdf, &bookmarks.open)?)?;
+    Ok((pdf, page_map))
 }
 
 #[cfg(test)]
@@ -327,6 +386,8 @@ mod assets;
 mod metadata;
 
 mod bookmarks;
+mod page_map;
+pub use page_map::{PageMap, PageSpan};
 
 mod tagging;
 
